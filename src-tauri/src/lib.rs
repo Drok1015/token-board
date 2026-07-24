@@ -128,29 +128,19 @@ fn codex_window(window: &Value) -> Option<(i64, String)> {
     Some((minutes, format!("{label} {}%", 100 - used)))
 }
 
-fn codex_line() -> QuotaLine {
-    let cli = if std::path::Path::new("/Applications/ChatGPT.app/Contents/Resources/codex").is_file() {
-        "/Applications/ChatGPT.app/Contents/Resources/codex"
-    } else {
-        "codex"
-    };
-    let mut child = match Command::new(cli)
+fn read_codex_limits(cli: &str) -> Option<String> {
+    let mut child = Command::new(cli)
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return QuotaLine { provider: "CODEX", value: "未安装".into() },
-    };
+        .ok()?;
 
-    let Some(mut stdin) = child.stdin.take() else {
-        return QuotaLine { provider: "CODEX", value: "读取失败".into() };
-    };
+    let mut stdin = child.stdin.take()?;
     let initialize = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": { "clientInfo": { "name": "额度脉搏", "version": "0.1.0" }, "capabilities": { "experimentalApi": true } }
+        "params": { "clientInfo": { "name": "Token 看板", "version": "0.2.0" }, "capabilities": { "experimentalApi": true } }
     });
     let read_limits = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": Value::Null
@@ -159,15 +149,14 @@ fn codex_line() -> QuotaLine {
         || writeln!(stdin, "{read_limits}").is_err()
         || stdin.flush().is_err()
     {
-        return QuotaLine { provider: "CODEX", value: "读取失败".into() };
+        let _ = child.kill();
+        return None;
     }
 
-    let Some(stdout) = child.stdout.take() else {
-        return QuotaLine { provider: "CODEX", value: "读取失败".into() };
-    };
+    let stdout = child.stdout.take()?;
     let reader = BufReader::new(stdout);
-    let mut value = "读取失败".to_string();
-    for line in reader.lines().take(12) {
+    let mut value = None;
+    for line in reader.lines().take(64) {
         let Ok(line) = line else { break };
         let Ok(payload) = serde_json::from_str::<Value>(&line) else { continue };
         if payload.get("id").and_then(Value::as_i64) != Some(2) { continue; }
@@ -177,12 +166,27 @@ fn codex_line() -> QuotaLine {
             .collect::<Vec<_>>();
         windows.sort_by_key(|(minutes, _)| *minutes);
         if !windows.is_empty() {
-            value = windows.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join(" / ");
+            value = Some(windows.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join(" / "));
         }
         break;
     }
     let _ = child.kill();
-    QuotaLine { provider: "CODEX", value }
+    value
+}
+
+fn codex_line() -> QuotaLine {
+    let cli = if std::path::Path::new("/Applications/ChatGPT.app/Contents/Resources/codex").is_file() {
+        "/Applications/ChatGPT.app/Contents/Resources/codex"
+    } else {
+        "codex"
+    };
+    for attempt in 0..2 {
+        if let Some(value) = read_codex_limits(cli) {
+            return QuotaLine { provider: "CODEX", value };
+        }
+        if attempt == 0 { std::thread::sleep(std::time::Duration::from_millis(600)); }
+    }
+    QuotaLine { provider: "CODEX", value: "读取失败".into() }
 }
 
 #[tauri::command]
