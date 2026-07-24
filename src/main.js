@@ -9,6 +9,7 @@ const BOARD_HEIGHT = 175;
 const EDGE_TAB_WIDTH = 24;
 const EDGE_TAB_HEIGHT = 72;
 const SNAP_DISTANCE = 16;
+const FADE_DURATION = 100;
 
 app.innerHTML = `
   <main class="app-shell" id="app-shell">
@@ -33,6 +34,7 @@ let edgePointer = null;
 let ignoreTabClick = false;
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+const wait = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
 
 async function collapseAtEdge(side, monitor, physicalPosition) {
   if (edgeState || transitioning) return;
@@ -48,17 +50,21 @@ async function collapseAtEdge(side, monitor, physicalPosition) {
     workPosition.y + workSize.height - EDGE_TAB_HEIGHT,
   );
   edgeState = { side, workPosition, workSize, tabY, scale };
-  shell.classList.add('edge-hidden', `edge-${side}`);
-  edgeTab.textContent = side === 'left' ? '›' : '‹';
-  edgeTab.setAttribute('aria-label', `展开${side === 'left' ? '左侧' : '右侧'} Token 看板`);
+  shell.classList.add('edge-switching');
 
   try {
+    await wait(FADE_DURATION);
+    shell.classList.add('edge-hidden', `edge-${side}`);
+    edgeTab.textContent = side === 'left' ? '›' : '‹';
+    edgeTab.setAttribute('aria-label', `展开${side === 'left' ? '左侧' : '右侧'} Token 看板`);
     await appWindow.setSize(new LogicalSize(EDGE_TAB_WIDTH, EDGE_TAB_HEIGHT));
     const tabX = side === 'left'
       ? workPosition.x
       : workPosition.x + workSize.width - EDGE_TAB_WIDTH;
     await appWindow.setPosition(new LogicalPosition(tabX, tabY));
   } finally {
+    await wait(30);
+    shell.classList.remove('edge-switching');
     transitioning = false;
   }
 }
@@ -115,8 +121,9 @@ async function revealBoard() {
   if (!edgeState || transitioning) return;
   transitioning = true;
   const { side, workPosition, workSize, tabY } = edgeState;
-  shell.classList.remove('edge-hidden', `edge-${side}`);
+  shell.classList.add('edge-switching');
   try {
+    await wait(FADE_DURATION);
     await appWindow.setSize(new LogicalSize(BOARD_WIDTH, BOARD_HEIGHT));
     const x = side === 'left'
       ? workPosition.x + SNAP_DISTANCE + 10
@@ -127,8 +134,11 @@ async function revealBoard() {
       workPosition.y + workSize.height - BOARD_HEIGHT,
     );
     await appWindow.setPosition(new LogicalPosition(x, y));
+    shell.classList.remove('edge-hidden', `edge-${side}`);
     edgeState = null;
   } finally {
+    await wait(30);
+    shell.classList.remove('edge-switching');
     transitioning = false;
   }
 }
