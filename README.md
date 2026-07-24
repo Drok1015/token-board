@@ -1,26 +1,49 @@
-# 额度脉搏
+# Token 看板
 
-![额度脉搏桌面悬浮看板](public/screenshot.png)
+![Token 看板桌面悬浮界面](public/screenshot.png)
 
-仅支持 macOS 的桌面悬浮额度看板。它以无标题栏、透明背景的窗口常驻桌面，不占用菜单栏；可直接拖动到任意位置，并始终置顶显示。
+仅支持 macOS 的桌面悬浮 Token/额度看板。它以无标题栏、透明背景的窗口常驻桌面，不占用菜单栏；可直接拖动到任意位置，并始终置顶显示。
 
 ## 功能
 
 - 展示 CODEX、KIMI、GLM、DEEPSEEK 的可用额度或余额
-- 自动读取本机已登录/已配置的账号信息；不将凭据写入项目或上传到 GitHub
+- 自动读取本机已登录或已配置的账号；不会将凭据写入项目或上传到 GitHub
 - 每 5 分钟自动刷新
 - 透明、无 Dock 图标的桌面悬浮窗口，可跨桌面显示并直接拖动
 
 CODEX 行由本机已登录的 ChatGPT/Codex 获取。当前账号若只返回一个额度周期，就只显示该周期；若同时返回多个周期，看板会自动展示，例如 `5h 80% / 7d 60%`。
 
-## 使用前提
+## 获取与配置凭据
 
-- macOS 11 或更高版本
-- 已安装并登录 ChatGPT 桌面版或 Codex CLI（用于 CODEX 额度）
-- 已登录 Kimi Code（用于 KIMI 额度）
-- 在 cc-switch 的 Codex 配置中设置了 GLM 与 DeepSeek 的 API Key（用于相应行）
+不要把任何 Key、Token 或 `auth.json` 提交到 Git。本项目只读取你本机已有的登录和配置。
 
-未配置或登录失效的服务会在看板中明确显示状态，不会回显任何密钥。
+### CODEX
+
+CODEX 额度不是手动粘贴 OpenAI API Key 获取的，而是来自 ChatGPT/Codex 登录账号的本机会话。
+
+1. 安装并登录 ChatGPT 桌面版，或在终端执行 `codex login` 完成登录。
+2. 登录信息由 Codex 保存在 `~/.codex/auth.json`；它等同于密码，请勿手动编辑、分享或提交。
+3. Token 看板通过本机 Codex app-server 读取额度。OpenAI Platform API Key 与 ChatGPT/Codex 订阅额度是两套不同的计费体系，不能互换。
+
+### KIMI
+
+1. 安装 Kimi Code CLI 后执行 `kimi login`，按设备授权流程完成登录。
+2. 登录成功后，Kimi Code 会在 `~/.kimi/credentials/kimi-code.json` 保存访问凭据。
+3. 看板仅从该文件读取 `access_token` 来查询额度；不要复制、编辑或上传此文件。
+
+### GLM（智谱）
+
+1. 在 [智谱开放平台的 API Key 页面](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys) 创建 API Key。
+2. 在 cc-switch 的 **Codex** 供应商配置中新增或编辑名称为 `Zhipu GLM` 的供应商，并填入 Key。
+3. cc-switch 将配置保存在 `~/.cc-switch/cc-switch.db` 的 `providers` 表中；本项目读取 `settings_config.auth.OPENAI_API_KEY`。请通过 cc-switch 修改，不要直接编辑 SQLite 数据库。
+
+### DeepSeek
+
+1. 在 [DeepSeek Platform API Keys](https://platform.deepseek.com/api_keys) 创建 API Key。
+2. 在 cc-switch 的 **Codex** 供应商配置中新增或编辑名称为 `DeepSeek` 的供应商，并填入 Key。
+3. 位置同样是 `~/.cc-switch/cc-switch.db` 的 `providers` 表及 `settings_config.auth.OPENAI_API_KEY` 字段；请通过 cc-switch 管理。
+
+未配置、未登录或凭据失效的服务会在看板中明确显示状态，不会回显密钥。
 
 ## 从源码运行
 
@@ -38,7 +61,7 @@ npm run tauri build
 构建结果位于：
 
 ```text
-src-tauri/target/release/bundle/macos/额度脉搏.app
+src-tauri/target/release/bundle/macos/Token 看板.app
 ```
 
 应用未签名或公证。首次打开被 macOS 阻止时，可在“系统设置 → 隐私与安全性”中选择允许打开。

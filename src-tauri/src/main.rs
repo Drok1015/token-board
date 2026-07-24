@@ -1,1 +1,1 @@
-fn main() { huide_pet_lib::run(); }
+fn main() { token_board_lib::run(); }

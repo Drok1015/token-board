@@ -4,9 +4,9 @@ import './style.css';
 const app = document.querySelector('#app');
 
 app.innerHTML = `
-  <section class="board" aria-label="额度脉搏看板" data-tauri-drag-region>
+  <section class="board" aria-label="Token 看板" data-tauri-drag-region>
     <div class="screen" aria-live="polite" data-tauri-drag-region>
-      <div class="screen-title">额度脉搏 <span class="updated">自动刷新</span><span class="signal">●</span></div>
+      <div class="screen-title">TOKEN 看板 <span class="updated">自动刷新</span><span class="signal">●</span></div>
       <div class="quota-row"><b>CODEX</b><span id="codex">读取中…</span></div>
       <div class="quota-row"><b>KIMI</b><span id="kimi">读取中…</span></div>
       <div class="quota-row"><b>GLM</b><span id="glm">读取中…</span></div>

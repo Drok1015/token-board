@@ -1,11 +1,11 @@
 [package]
-name = "huide-pet"
-version = "0.1.0"
-description = "A floating macOS pet that launches 汇兑"
+name = "token-board"
+version = "0.2.0"
+description = "A floating macOS token quota dashboard"
 edition = "2021"
 
 [lib]
-name = "huide_pet_lib"
+name = "token_board_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]

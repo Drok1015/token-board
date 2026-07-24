@@ -212,5 +212,5 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![open_app, get_quotas])
         .run(tauri::generate_context!())
-        .expect("启动汇兑小猪失败");
+        .expect("启动 Token 看板失败");
 }
