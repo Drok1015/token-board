@@ -3,8 +3,12 @@ use serde_json::Value;
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
+    path::Path,
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 
 #[derive(Serialize)]
 struct QuotaLine {
@@ -54,21 +58,68 @@ async fn glm_line(client: &reqwest::Client) -> QuotaLine {
     }
 }
 
+fn now_secs() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+// access_token 有效期仅 15 分钟，过期时用 refresh_token 换新并写回凭据文件
+async fn kimi_refresh(client: &reqwest::Client, path: &Path, credential: &mut Value) -> Option<String> {
+    let refresh_token = credential["refresh_token"].as_str()?.to_owned();
+    let response = client.post("https://auth.kimi.com/api/oauth/token")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+            ("client_id", KIMI_CLIENT_ID),
+        ])
+        .send().await.and_then(|r| r.error_for_status()).ok()?;
+    let body: Value = response.json().await.ok()?;
+    let token = body["access_token"].as_str()?.to_owned();
+    credential["access_token"] = Value::from(token.clone());
+    if let Some(new_refresh) = body["refresh_token"].as_str() {
+        credential["refresh_token"] = Value::from(new_refresh);
+    }
+    if let Some(expires_in) = body["expires_in"].as_f64() {
+        credential["expires_at"] = Value::from(now_secs() + expires_in);
+    }
+    if let Ok(data) = serde_json::to_vec(credential) {
+        let _ = fs::write(path, data);
+    }
+    Some(token)
+}
+
+async fn kimi_usages(client: &reqwest::Client, token: &str) -> Option<Value> {
+    client.get("https://api.kimi.com/coding/v1/usages")
+        .bearer_auth(token).send().await.and_then(|r| r.error_for_status())
+        .ok()?.json().await.ok()
+}
+
 async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
     let Some(path) = home_file(".kimi/credentials/kimi-code.json") else {
         return QuotaLine { provider: "KIMI", value: "未登录".into() };
     };
-    let credential: Value = match fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok()) {
+    let mut credential: Value = match fs::read(&path).ok().and_then(|data| serde_json::from_slice(&data).ok()) {
         Some(value) => value,
         None => return QuotaLine { provider: "KIMI", value: "未登录".into() },
     };
-    let token = credential["access_token"].as_str().unwrap_or_default();
-    let response = match client.get("https://api.kimi.com/coding/v1/usages")
-        .bearer_auth(token).send().await.and_then(|r| r.error_for_status()) {
-        Ok(value) => value,
-        Err(_) => return QuotaLine { provider: "KIMI", value: "认证失效".into() },
+    let mut token = credential["access_token"].as_str().unwrap_or_default().to_owned();
+    let expires_at = credential["expires_at"].as_f64().unwrap_or(0.0);
+    if token.is_empty() || expires_at < now_secs() + 60.0 {
+        match kimi_refresh(client, &path, &mut credential).await {
+            Some(new_token) => token = new_token,
+            None => return QuotaLine { provider: "KIMI", value: "认证失效".into() },
+        }
+    }
+    // 本地未过期但服务端拒绝（如凭据已在别处轮换）时，强制刷新重试一次
+    let payload = match kimi_usages(client, &token).await {
+        Some(value) => value,
+        None => match kimi_refresh(client, &path, &mut credential).await {
+            Some(new_token) => match kimi_usages(client, &new_token).await {
+                Some(value) => value,
+                None => return QuotaLine { provider: "KIMI", value: "认证失效".into() },
+            },
+            None => return QuotaLine { provider: "KIMI", value: "认证失效".into() },
+        },
     };
-    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "KIMI", value: "读取失败".into() } };
     let mut rows: Vec<(String, String)> = vec![];
     if let Some(limits) = payload["limits"].as_array() {
         for item in limits {
