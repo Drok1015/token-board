@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -18,6 +18,18 @@ struct QuotaLine {
 
 fn home_file(path: &str) -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(path))
+}
+
+fn kimi_credential_paths_from_home(home: &Path) -> [PathBuf; 2] {
+    [
+        home.join(".kimi-code/credentials/kimi-code.json"),
+        home.join(".kimi/credentials/kimi-code.json"),
+    ]
+}
+
+fn kimi_credential_paths() -> Option<[PathBuf; 2]> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    Some(kimi_credential_paths_from_home(&home))
 }
 
 fn provider_key(name: &str) -> Option<String> {
@@ -93,32 +105,45 @@ async fn kimi_usages(client: &reqwest::Client, token: &str) -> Option<Value> {
         .ok()?.json().await.ok()
 }
 
-async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
-    let Some(path) = home_file(".kimi/credentials/kimi-code.json") else {
-        return QuotaLine { provider: "KIMI", value: "未登录".into() };
-    };
+async fn kimi_payload_from_path(client: &reqwest::Client, path: &Path) -> Option<Value> {
     let mut credential: Value = match fs::read(&path).ok().and_then(|data| serde_json::from_slice(&data).ok()) {
         Some(value) => value,
-        None => return QuotaLine { provider: "KIMI", value: "未登录".into() },
+        None => return None,
     };
     let mut token = credential["access_token"].as_str().unwrap_or_default().to_owned();
     let expires_at = credential["expires_at"].as_f64().unwrap_or(0.0);
     if token.is_empty() || expires_at < now_secs() + 60.0 {
-        match kimi_refresh(client, &path, &mut credential).await {
+        match kimi_refresh(client, path, &mut credential).await {
             Some(new_token) => token = new_token,
-            None => return QuotaLine { provider: "KIMI", value: "认证失效".into() },
+            None => return None,
         }
     }
     // 本地未过期但服务端拒绝（如凭据已在别处轮换）时，强制刷新重试一次
-    let payload = match kimi_usages(client, &token).await {
-        Some(value) => value,
-        None => match kimi_refresh(client, &path, &mut credential).await {
+    match kimi_usages(client, &token).await {
+        Some(value) => Some(value),
+        None => match kimi_refresh(client, path, &mut credential).await {
             Some(new_token) => match kimi_usages(client, &new_token).await {
-                Some(value) => value,
-                None => return QuotaLine { provider: "KIMI", value: "认证失效".into() },
+                Some(value) => Some(value),
+                None => None,
             },
-            None => return QuotaLine { provider: "KIMI", value: "认证失效".into() },
+            None => None,
         },
+    }
+}
+
+async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
+    let Some(paths) = kimi_credential_paths() else {
+        return QuotaLine { provider: "KIMI", value: "未登录".into() };
+    };
+    let mut payload = None;
+    for path in paths {
+        if let Some(value) = kimi_payload_from_path(client, &path).await {
+            payload = Some(value);
+            break;
+        }
+    }
+    let Some(payload) = payload else {
+        return QuotaLine { provider: "KIMI", value: "未登录".into() };
     };
     let mut rows: Vec<(String, String)> = vec![];
     if let Some(limits) = payload["limits"].as_array() {
@@ -268,4 +293,21 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![open_app, get_quotas])
         .run(tauri::generate_context!())
         .expect("启动 Token 看板失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kimi_credentials_prefer_kimi_code_then_legacy_kimi() {
+        let paths = kimi_credential_paths_from_home(Path::new("home"));
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("home/.kimi-code/credentials/kimi-code.json"),
+                PathBuf::from("home/.kimi/credentials/kimi-code.json"),
+            ]
+        );
+    }
 }
