@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fs,
@@ -7,6 +7,7 @@ use std::{
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tauri::{Emitter, Manager};
 
 const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 
@@ -14,6 +15,33 @@ const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 struct QuotaLine {
     provider: &'static str,
     value: String,
+    plan: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+struct BoardSettings {
+    auto_hide: bool,
+    hide_delay_seconds: u64,
+    show_plans: bool,
+}
+
+impl Default for BoardSettings {
+    fn default() -> Self {
+        Self {
+            auto_hide: false,
+            hide_delay_seconds: 10,
+            show_plans: true,
+        }
+    }
+}
+
+impl BoardSettings {
+    fn normalized(mut self) -> Self {
+        self.hide_delay_seconds = self.hide_delay_seconds.clamp(1, 3_600);
+        self
+    }
 }
 
 fn home_file(path: &str) -> Option<std::path::PathBuf> {
@@ -50,24 +78,55 @@ fn remaining(used: i64, limit: i64) -> String {
     format!("{}%", ((limit - used).clamp(0, limit) * 100 / limit.max(1)))
 }
 
+fn readable_plan_name(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("LEVEL_")
+        .split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn kimi_membership_name(level: &str) -> String {
+    match level.trim().to_ascii_uppercase().as_str() {
+        "LEVEL_FREE" => "Free".into(),
+        "LEVEL_BASIC" => "Adagio".into(),
+        "LEVEL_STANDARD" => "Moderato".into(),
+        "LEVEL_INTERMEDIATE" => "Allegretto".into(),
+        "LEVEL_ADVANCED" => "Allegro".into(),
+        "LEVEL_PREMIUM" => "Vivace".into(),
+        _ => readable_plan_name(level),
+    }
+}
+
 async fn glm_line(client: &reqwest::Client) -> QuotaLine {
     let Some(key) = provider_key("Zhipu GLM") else {
-        return QuotaLine { provider: "GLM", value: "未配置".into() };
+        return QuotaLine { provider: "GLM", value: "未配置".into(), plan: None };
     };
     let response = match client.get("https://open.bigmodel.cn/api/monitor/usage/quota/limit")
         .bearer_auth(key).send().await.and_then(|r| r.error_for_status()) {
         Ok(value) => value,
-        Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into() },
+        Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into(), plan: None },
     };
-    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into() } };
+    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into(), plan: None } };
     let mut limits: Vec<&Value> = payload.pointer("/data/limits").and_then(Value::as_array).into_iter().flatten()
         .filter(|item| item["type"].as_str() == Some("TOKENS_LIMIT")).collect();
     limits.sort_by_key(|item| number(item.get("nextResetTime")).unwrap_or(i64::MAX));
     let pct = |item: &Value| format!("{}%", 100 - number(item.get("percentage")).unwrap_or(100));
-    match (limits.first(), limits.last()) {
-        (Some(first), Some(last)) => QuotaLine { provider: "GLM", value: format!("5h {} / 7d {}", pct(first), pct(last)) },
-        _ => QuotaLine { provider: "GLM", value: "暂无额度".into() },
-    }
+    let value = match (limits.first(), limits.last()) {
+        (Some(first), Some(last)) => format!("5h {} / 7d {}", pct(first), pct(last)),
+        _ => "暂无额度".into(),
+    };
+    let plan = payload.pointer("/data/level").and_then(Value::as_str).map(str::to_owned);
+    QuotaLine { provider: "GLM", value, plan }
 }
 
 fn now_secs() -> f64 {
@@ -106,7 +165,7 @@ async fn kimi_usages(client: &reqwest::Client, token: &str) -> Option<Value> {
 }
 
 async fn kimi_payload_from_path(client: &reqwest::Client, path: &Path) -> Option<Value> {
-    let mut credential: Value = match fs::read(&path).ok().and_then(|data| serde_json::from_slice(&data).ok()) {
+    let mut credential: Value = match fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok()) {
         Some(value) => value,
         None => return None,
     };
@@ -122,10 +181,7 @@ async fn kimi_payload_from_path(client: &reqwest::Client, path: &Path) -> Option
     match kimi_usages(client, &token).await {
         Some(value) => Some(value),
         None => match kimi_refresh(client, path, &mut credential).await {
-            Some(new_token) => match kimi_usages(client, &new_token).await {
-                Some(value) => Some(value),
-                None => None,
-            },
+            Some(new_token) => kimi_usages(client, &new_token).await,
             None => None,
         },
     }
@@ -133,7 +189,7 @@ async fn kimi_payload_from_path(client: &reqwest::Client, path: &Path) -> Option
 
 async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
     let Some(paths) = kimi_credential_paths() else {
-        return QuotaLine { provider: "KIMI", value: "未登录".into() };
+        return QuotaLine { provider: "KIMI", value: "未登录".into(), plan: None };
     };
     let mut payload = None;
     for path in paths {
@@ -143,7 +199,7 @@ async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
         }
     }
     let Some(payload) = payload else {
-        return QuotaLine { provider: "KIMI", value: "未登录".into() };
+        return QuotaLine { provider: "KIMI", value: "未登录".into(), plan: None };
     };
     let mut rows: Vec<(String, String)> = vec![];
     if let Some(limits) = payload["limits"].as_array() {
@@ -169,26 +225,28 @@ async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
     }
     let five_hour = rows.iter().find(|(name, _)| name.contains("5h") || name.contains("5H")).or_else(|| rows.first());
     let seven_day = rows.iter().find(|(name, _)| name.contains("7d") || name.contains("7D")).or_else(|| rows.get(1));
-    match (five_hour, seven_day) {
-        (Some((_, h5)), Some((_, d7))) => QuotaLine { provider: "KIMI", value: format!("5h {h5} / 7d {d7}") },
-        (Some((name, pct)), None) => QuotaLine { provider: "KIMI", value: format!("{name} {pct}") },
-        _ => QuotaLine { provider: "KIMI", value: "暂无额度".into() },
-    }
+    let value = match (five_hour, seven_day) {
+        (Some((_, h5)), Some((_, d7))) => format!("5h {h5} / 7d {d7}"),
+        (Some((name, pct)), None) => format!("{name} {pct}"),
+        _ => "暂无额度".into(),
+    };
+    let plan = payload.pointer("/user/membership/level").and_then(Value::as_str).map(kimi_membership_name);
+    QuotaLine { provider: "KIMI", value, plan }
 }
 
 async fn deepseek_line(client: &reqwest::Client) -> QuotaLine {
     let Some(key) = provider_key("DeepSeek") else {
-        return QuotaLine { provider: "DEEPSEEK", value: "未配置".into() };
+        return QuotaLine { provider: "DEEPSEEK", value: "未配置".into(), plan: None };
     };
     let response = match client.get("https://api.deepseek.com/user/balance")
         .bearer_auth(key).send().await.and_then(|r| r.error_for_status()) {
         Ok(value) => value,
-        Err(_) => return QuotaLine { provider: "DEEPSEEK", value: "读取失败".into() },
+        Err(_) => return QuotaLine { provider: "DEEPSEEK", value: "读取失败".into(), plan: None },
     };
-    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "DEEPSEEK", value: "读取失败".into() } };
+    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "DEEPSEEK", value: "读取失败".into(), plan: None } };
     let balance = payload["balance_infos"].as_array().and_then(|items| items.first())
         .and_then(|item| item["total_balance"].as_str()).unwrap_or("—");
-    QuotaLine { provider: "DEEPSEEK", value: format!("余额 ¥{balance}") }
+    QuotaLine { provider: "DEEPSEEK", value: format!("余额 ¥{balance}"), plan: Some("Token".into()) }
 }
 
 fn codex_window(window: &Value) -> Option<(i64, String)> {
@@ -204,7 +262,7 @@ fn codex_window(window: &Value) -> Option<(i64, String)> {
     Some((minutes, format!("{label} {}%", 100 - used)))
 }
 
-fn read_codex_limits(cli: &str) -> Option<String> {
+fn read_codex_limits(cli: &str) -> Option<(String, Option<String>)> {
     let mut child = Command::new(cli)
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
@@ -242,7 +300,9 @@ fn read_codex_limits(cli: &str) -> Option<String> {
             .collect::<Vec<_>>();
         windows.sort_by_key(|(minutes, _)| *minutes);
         if !windows.is_empty() {
-            value = Some(windows.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join(" / "));
+            let usage = windows.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join(" / ");
+            let plan = limits.get("planType").and_then(Value::as_str).map(readable_plan_name);
+            value = Some((usage, plan));
         }
         break;
     }
@@ -257,12 +317,12 @@ fn codex_line() -> QuotaLine {
         "codex"
     };
     for attempt in 0..2 {
-        if let Some(value) = read_codex_limits(cli) {
-            return QuotaLine { provider: "CODEX", value };
+        if let Some((value, plan)) = read_codex_limits(cli) {
+            return QuotaLine { provider: "CODEX", value, plan };
         }
         if attempt == 0 { std::thread::sleep(std::time::Duration::from_millis(600)); }
     }
-    QuotaLine { provider: "CODEX", value: "读取失败".into() }
+    QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None }
 }
 
 #[tauri::command]
@@ -271,9 +331,87 @@ async fn get_quotas() -> Vec<QuotaLine> {
     let Ok(client) = client else { return vec![] };
     let codex = tauri::async_runtime::spawn_blocking(codex_line);
     let mut quotas = vec![kimi_line(&client).await, glm_line(&client).await, deepseek_line(&client).await];
-    let codex = codex.await.unwrap_or(QuotaLine { provider: "CODEX", value: "读取失败".into() });
+    let codex = codex.await.unwrap_or(QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None });
     quotas.insert(0, codex);
     quotas
+}
+
+fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join("settings.json"))
+        .map_err(|error| format!("无法确定设置保存位置：{error}"))
+}
+
+fn read_settings(app: &tauri::AppHandle) -> BoardSettings {
+    let Ok(path) = settings_path(app) else {
+        return BoardSettings::default();
+    };
+    fs::read(path)
+        .ok()
+        .and_then(|data| serde_json::from_slice::<BoardSettings>(&data).ok())
+        .unwrap_or_default()
+        .normalized()
+}
+
+#[tauri::command]
+fn get_settings(app: tauri::AppHandle) -> BoardSettings {
+    read_settings(&app)
+}
+
+#[tauri::command]
+fn save_settings(app: tauri::AppHandle, settings: BoardSettings) -> Result<(), String> {
+    let settings = settings.normalized();
+    let path = settings_path(&app)?;
+    let parent = path.parent().ok_or_else(|| "设置保存位置无效".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建设置目录：{error}"))?;
+    let data = serde_json::to_vec_pretty(&settings).map_err(|error| format!("无法序列化设置：{error}"))?;
+    fs::write(path, data).map_err(|error| format!("无法保存设置：{error}"))?;
+    app.emit_to("main", "settings-updated", settings)
+        .map_err(|error| format!("无法应用设置：{error}"))?;
+    if let Some(window) = app.get_webview_window("settings") {
+        window.close().map_err(|error| format!("无法关闭设置窗口：{error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.show().map_err(|error| format!("无法显示设置窗口：{error}"))?;
+        window.set_focus().map_err(|error| format!("无法聚焦设置窗口：{error}"))?;
+        return Ok(());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "settings",
+        tauri::WebviewUrl::App("index.html?view=settings".into()),
+    )
+    .title("设置")
+    .inner_size(410.0, 320.0)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .center()
+    .build()
+    .map_err(|error| format!("无法打开设置窗口：{error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn close_settings(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.close().map_err(|error| format!("无法关闭设置窗口：{error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn close_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -290,7 +428,15 @@ fn open_app(app: &str) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![open_app, get_quotas])
+        .invoke_handler(tauri::generate_handler![
+            open_app,
+            get_quotas,
+            get_settings,
+            save_settings,
+            open_settings,
+            close_settings,
+            close_app
+        ])
         .run(tauri::generate_context!())
         .expect("启动 Token 看板失败");
 }
@@ -309,5 +455,44 @@ mod tests {
                 PathBuf::from("home/.kimi/credentials/kimi-code.json"),
             ]
         );
+    }
+
+    #[test]
+    fn board_settings_default_to_ten_seconds_and_clamp_invalid_values() {
+        let defaults = BoardSettings::default();
+        assert!(!defaults.auto_hide);
+        assert_eq!(defaults.hide_delay_seconds, 10);
+        assert!(defaults.show_plans);
+        assert_eq!(
+            BoardSettings { auto_hide: true, hide_delay_seconds: 0, ..BoardSettings::default() }
+                .normalized()
+                .hide_delay_seconds,
+            1
+        );
+        assert_eq!(
+            BoardSettings { auto_hide: true, hide_delay_seconds: 9_999, ..BoardSettings::default() }
+                .normalized()
+                .hide_delay_seconds,
+            3_600
+        );
+    }
+
+    #[test]
+    fn legacy_settings_keep_existing_values_and_enable_plan_labels() {
+        let settings: BoardSettings = serde_json::from_str(
+            r#"{"autoHide":true,"hideDelaySeconds":23}"#,
+        )
+        .expect("legacy settings should remain readable");
+        assert!(settings.auto_hide);
+        assert_eq!(settings.hide_delay_seconds, 23);
+        assert!(settings.show_plans);
+    }
+
+    #[test]
+    fn provider_plan_names_are_readable() {
+        assert_eq!(readable_plan_name("plus"), "Plus");
+        assert_eq!(readable_plan_name("enterprise_team"), "Enterprise Team");
+        assert_eq!(kimi_membership_name("LEVEL_INTERMEDIATE"), "Allegretto");
+        assert_eq!(kimi_membership_name("LEVEL_PREMIUM"), "Vivace");
     }
 }
