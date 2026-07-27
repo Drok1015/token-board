@@ -6,7 +6,7 @@
   "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
   "app": {
     "macOSPrivateApi": true,
-    "windows": [{ "label": "main", "title": "Token 看板", "width": 236, "height": 175, "transparent": true, "decorations": false, "alwaysOnTop": true, "shadow": false, "resizable": false, "skipTaskbar": true, "visibleOnAllWorkspaces": true }],
+    "windows": [{ "label": "main", "title": "Token 看板", "width": 290, "height": 175, "transparent": true, "decorations": false, "alwaysOnTop": true, "shadow": false, "resizable": false, "skipTaskbar": true, "visibleOnAllWorkspaces": true }],
     "security": { "csp": null }
   },
   "bundle": { "active": true, "targets": ["app"], "icon": ["icons/icon.icns"], "macOS": { "minimumSystemVersion": "11.0" } }

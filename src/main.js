@@ -4,7 +4,7 @@ import './style.css';
 
 const app = document.querySelector('#app');
 const appWindow = getCurrentWindow();
-const BOARD_WIDTH = 236;
+const BOARD_WIDTH = 290;
 const BOARD_HEIGHT = 175;
 const EDGE_TAB_WIDTH = 24;
 const EDGE_TAB_HEIGHT = 72;
@@ -16,16 +16,17 @@ app.innerHTML = `
     <section class="board" aria-label="Token 看板" data-tauri-drag-region>
       <div class="screen" aria-live="polite" data-tauri-drag-region>
         <div class="screen-title">TOKEN 看板 <span class="updated">自动刷新</span><span class="signal">●</span></div>
-        <div class="quota-row"><b>CODEX</b><span id="codex">读取中…</span></div>
-        <div class="quota-row"><b>KIMI</b><span id="kimi">读取中…</span></div>
-        <div class="quota-row"><b>GLM</b><span id="glm">读取中…</span></div>
-        <div class="quota-row"><b>DEEPSEEK</b><span id="deepseek">读取中…</span></div>
+        <div class="quota-row"><div class="quota-label"><b>CODEX</b><span id="codex-plan" class="plan-tag"></span></div><span id="codex">读取中…</span></div>
+        <div class="quota-row"><div class="quota-label"><b>KIMI</b><span id="kimi-plan" class="plan-tag"></span></div><span id="kimi">读取中…</span></div>
+        <div class="quota-row"><div class="quota-label"><b>GLM</b><span id="glm-plan" class="plan-tag"></span></div><span id="glm">读取中…</span></div>
+        <div class="quota-row"><div class="quota-label"><b>DEEPSEEK</b><span id="deepseek-plan" class="plan-tag"></span></div><span id="deepseek">读取中…</span></div>
       </div>
     </section>
     <button class="edge-tab" id="edge-tab" type="button" aria-label="展开 Token 看板" title="点击展开；上下拖动调整位置">›</button>
   </main>`;
 
 const ids = { CODEX: 'codex', KIMI: 'kimi', GLM: 'glm', DEEPSEEK: 'deepseek' };
+const planIds = { CODEX: 'codex-plan', KIMI: 'kimi-plan', GLM: 'glm-plan', DEEPSEEK: 'deepseek-plan' };
 const shell = document.querySelector('#app-shell');
 const edgeTab = document.querySelector('#edge-tab');
 let edgeState = null;
@@ -175,13 +176,16 @@ appWindow.onMoved(({ payload }) => {
 async function refreshQuotas() {
   try {
     const lines = await invoke('get_quotas');
-    lines.forEach(({ provider, value }) => {
+    lines.forEach(({ provider, value, plan }) => {
       const node = document.querySelector(`#${ids[provider]}`);
       if (node) node.textContent = value;
+      const planNode = document.querySelector(`#${planIds[provider]}`);
+      if (planNode) planNode.textContent = plan ? ` ${plan} ` : '';
     });
   } catch (error) {
     console.error(error);
     Object.values(ids).forEach((id) => { document.querySelector(`#${id}`).textContent = '读取失败'; });
+    Object.values(planIds).forEach((id) => { document.querySelector(`#${id}`).textContent = ''; });
   }
 }
 
