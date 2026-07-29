@@ -76,11 +76,13 @@ src-tauri/target/release/bundle/macos/Token 看板.app
 
 ## 发布新版本
 
-发布由 GitHub Actions 自动完成（见 `.github/workflows/release.yml`）：
+发布已全自动（`.githooks/pre-push` + `.github/workflows/release.yml`）：
 
-1. 提交代码改动，并把 `package.json` 的 `version` 加 1（CI 会自动同步到 `tauri.conf.json` 和 `Cargo.toml`）。
-2. push 到 `main`。如果该版本号的 tag 尚未发布，Action 会自动完成 macOS 构建、ad-hoc 签名、压缩，并创建 tag 与 Release（`TokenBoard-v<版本>-macos.zip`，标记为 Latest）。
-3. 如果版本号没变（tag 已存在），Action 会直接跳过，不会重复发布。
+1. 提交代码改动，push 到 `main` 即可，无需手动改版本号。
+2. pre-push 钩子会检查 `package.json` 当前版本是否已发布：已发布则自动把 patch 版本 +1，生成一个 `chore: bump version` 提交随本次 push 一起推送；尚未发布（比如手动改过版本号）则保持不变。想跳过自动提升可用 `git push --no-verify`。
+3. CI 检测到新版本号后自动完成 macOS 构建、ad-hoc 签名、压缩，并创建 tag 与 Release（`TokenBoard-v<版本>-macos.zip`，标记为 Latest）；版本号没变则自动跳过。
+
+钩子随仓库提交在 `.githooks/` 中。首次克隆后执行一次 `npm install`（`prepare` 脚本会自动配置 `core.hooksPath`），或手动执行 `git config core.hooksPath .githooks`。
 
 ## 说明
 

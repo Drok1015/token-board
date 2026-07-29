@@ -1,0 +1,34 @@
+#!/bin/bash
+# push 到 main 前自动提升 package.json 的 patch 版本。
+# 当前版本已发布（远端存在对应 tag）才 +1，并生成 bump 提交随本次 push 一起推送；
+# 当前版本尚未发布则保持不变，避免覆盖手动指定的版本号。
+# 跳过本钩子：git push --no-verify
+
+set -e
+
+pushing_main=false
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    pushing_main=true
+  fi
+done
+
+[ "$pushing_main" = true ] || exit 0
+
+current=$(node -p "require('./package.json').version")
+remote="$1"
+
+rc=0
+git ls-remote --exit-code --tags "$remote" "refs/tags/v$current" >/dev/null 2>&1 || rc=$?
+
+if [ "$rc" -eq 0 ]; then
+  next=$(npm version patch --no-git-tag-version)
+  next=${next#v}
+  git add package.json
+  git commit -m "chore: bump version to $next" >/dev/null
+  echo "[pre-push] 版本号 $current -> $next，CI 将自动发布 v$next"
+elif [ "$rc" -eq 2 ]; then
+  echo "[pre-push] 当前版本 v$current 尚未发布，保持不变"
+else
+  echo "[pre-push] 无法查询远端 tag（网络问题？），本次不自动提升版本"
+fi

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.0",
