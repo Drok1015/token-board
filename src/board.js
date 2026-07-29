@@ -47,6 +47,7 @@ export function mountBoard() {
   let settings = { ...DEFAULT_SETTINGS };
   let autoHideTimer = null;
   let refreshInProgress = false;
+  let codexFullAlerted = false;
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
   const wait = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
@@ -249,6 +250,21 @@ export function mountBoard() {
     scheduleAutoHide();
   }
 
+  // CODEX 只看 7d 额度窗口：回到 100% 时弹系统提醒一次；低于 100% 后解除锁存，再次回到 100% 会重新提醒
+  async function maybeAlertCodexFull(lines) {
+    const codex = lines.find((line) => line.provider === 'CODEX');
+    if (!codex) return;
+    const match = codex.value.match(/7d\s+(\d+)%/);
+    if (!match) return; // 没有 7d 数据或读取失败时不改变锁存状态
+    if (Number(match[1]) >= 100) {
+      if (codexFullAlerted) return;
+      codexFullAlerted = true;
+      await invoke('notify_codex_full');
+    } else {
+      codexFullAlerted = false;
+    }
+  }
+
   async function refreshQuotas() {
     if (refreshInProgress) return;
     refreshInProgress = true;
@@ -262,6 +278,7 @@ export function mountBoard() {
         if (planNode) planNode.textContent = plan || '';
       });
       updated.textContent = '刚刚刷新';
+      await maybeAlertCodexFull(lines);
     } catch (error) {
       console.error(error);
       Object.values(ids).forEach((id) => {

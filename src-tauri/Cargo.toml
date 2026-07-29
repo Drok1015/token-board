@@ -1,6 +1,6 @@
 [package]
 name = "token-board"
-version = "0.2.3"
+version = "0.2.4"
 description = "A floating macOS token quota dashboard"
 edition = "2021"
 

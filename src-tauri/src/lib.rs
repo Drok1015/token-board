@@ -414,6 +414,14 @@ fn close_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+// CODEX 额度回到 100% 时弹系统对话框提醒；osascript 会等用户点击，后台运行不阻塞看板
+#[tauri::command]
+fn notify_codex_full() {
+    let _ = Command::new("osascript")
+        .args(["-e", r#"display dialog "codex重置了!!!老铁,抓紧蹬!!" with title "Token 看板" buttons {"知道了"} default button "知道了""#])
+        .spawn();
+}
+
 #[tauri::command]
 fn open_app(app: &str) -> Result<(), String> {
     let app_name = match app {
@@ -435,7 +443,8 @@ pub fn run() {
             save_settings,
             open_settings,
             close_settings,
-            close_app
+            close_app,
+            notify_codex_full
         ])
         .run(tauri::generate_context!())
         .expect("启动 Token 看板失败");
