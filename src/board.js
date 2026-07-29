@@ -25,11 +25,12 @@ export function mountBoard() {
     <main class="app-shell" id="app-shell">
       <section class="board" aria-label="Token 看板" data-tauri-drag-region>
         <div class="screen" aria-live="polite" data-tauri-drag-region>
-          <div class="screen-title">TOKEN 看板 <span class="updated" id="updated">自动刷新</span><span class="signal">●</span></div>
+          <div class="screen-title">TOKEN 看板 <span class="signal">●</span><span class="updated" id="updated">自动刷新</span></div>
           <div class="quota-row"><b>CODEX</b><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span></div>
           <div class="quota-row"><b>KIMI</b><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span></div>
           <div class="quota-row"><b>GLM</b><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span></div>
           <div class="quota-row"><b>DEEPSEEK</b><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span></div>
+          <div class="screen-footer">5分钟刷新一次，可右键手动刷新</div>
         </div>
       </section>
       <button class="edge-tab" id="edge-tab" type="button" aria-label="展开 Token 看板" title="点击展开；上下拖动调整位置">›</button>
@@ -48,6 +49,7 @@ export function mountBoard() {
   let autoHideTimer = null;
   let refreshInProgress = false;
   let codexFullAlerted = false;
+  let lastRefreshAt = null;
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
   const wait = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
@@ -265,6 +267,13 @@ export function mountBoard() {
     }
   }
 
+  // 刷新成功后按「刚刚刷新 / N分钟前更新」展示，每分钟更新一次
+  function renderRefreshElapsed() {
+    if (lastRefreshAt === null) return;
+    const minutes = Math.floor((Date.now() - lastRefreshAt) / 60000);
+    updated.textContent = minutes === 0 ? '刚刚刷新' : `${minutes}分钟前更新`;
+  }
+
   async function refreshQuotas() {
     if (refreshInProgress) return;
     refreshInProgress = true;
@@ -277,7 +286,8 @@ export function mountBoard() {
         const planNode = document.querySelector(`#${planIds[provider]}`);
         if (planNode) planNode.textContent = plan || '';
       });
-      updated.textContent = '刚刚刷新';
+      lastRefreshAt = Date.now();
+      renderRefreshElapsed();
       await maybeAlertCodexFull(lines);
     } catch (error) {
       console.error(error);
@@ -367,4 +377,5 @@ export function mountBoard() {
 
   refreshQuotas().catch(console.error);
   window.setInterval(() => { refreshQuotas().catch(console.error); }, 5 * 60 * 1000);
+  window.setInterval(renderRefreshElapsed, 60 * 1000);
 }
