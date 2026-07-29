@@ -74,6 +74,14 @@ src-tauri/target/release/bundle/macos/Token 看板.app
 
 应用未签名或公证。首次打开被 macOS 阻止时，可在“系统设置 → 隐私与安全性”中选择允许打开。
 
+## 发布新版本
+
+发布由 GitHub Actions 自动完成（见 `.github/workflows/release.yml`）：
+
+1. 提交代码改动，并把 `package.json` 的 `version` 加 1（CI 会自动同步到 `tauri.conf.json` 和 `Cargo.toml`）。
+2. push 到 `main`。如果该版本号的 tag 尚未发布，Action 会自动完成 macOS 构建、ad-hoc 签名、压缩，并创建 tag 与 Release（`TokenBoard-v<版本>-macos.zip`，标记为 Latest）。
+3. 如果版本号没变（tag 已存在），Action 会直接跳过，不会重复发布。
+
 ## 说明
 
 Codex 额度读取依赖本机 Codex 的 app-server 接口；该接口当前仍属于 experimental，未来 Codex 更新若改变接口，看板会显示“读取失败”，其余服务不受影响。

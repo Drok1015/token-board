@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # 先用便宜的 runner 判断 package.json 里的版本是否已发布过，未发布才占用 macOS runner
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      exists: ${{ steps.meta.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git ls-remote --tags origin "refs/tags/v$VERSION" | grep -q .; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: check
+    if: needs.check.outputs.exists == 'false'
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 只需维护 package.json 的版本号，CI 里同步到 tauri.conf.json 和 Cargo.toml（不提交回仓库）
+      - name: Sync version
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+            conf.version = '$VERSION';
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2) + '\n');
+          "
+          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+
+      - run: npm ci
+
+      - run: npm run tauri build
+
+      - name: Sign and zip
+        run: |
+          cd src-tauri/target/release/bundle/macos
+          codesign --force --deep --sign - "Token 看板.app"
+          codesign --verify "Token 看板.app"
+          ditto -c -k --keepParent "Token 看板.app" "TokenBoard-v$VERSION-macos.zip"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Token 看板 v${{ env.VERSION }}
+          generate_release_notes: true
+          make_latest: true
+          files: src-tauri/target/release/bundle/macos/TokenBoard-v${{ env.VERSION }}-macos.zip
