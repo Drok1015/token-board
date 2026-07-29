@@ -76,13 +76,11 @@ src-tauri/target/release/bundle/macos/Token 看板.app
 
 ## 发布新版本
 
-发布已全自动（`.githooks/pre-push` + `.github/workflows/release.yml`）：
+发布已全自动（`.github/workflows/release.yml`）：提交代码改动并 push 到 `main` 即可，无需手动改版本号、无需本地钩子。
 
-1. 提交代码改动，push 到 `main` 即可，无需手动改版本号。
-2. pre-push 钩子会检查 `package.json` 当前版本是否已发布：已发布则自动把 patch 版本 +1，生成一个 `chore: bump version` 提交随本次 push 一起推送；尚未发布（比如手动改过版本号）则保持不变。想跳过自动提升可用 `git push --no-verify`。
-3. CI 检测到新版本号后自动完成 macOS 构建、ad-hoc 签名、压缩，并创建 tag 与 Release（`TokenBoard-v<版本>-macos.zip`，标记为 Latest）；版本号没变则自动跳过。
-
-钩子随仓库提交在 `.githooks/` 中。首次克隆后执行一次 `npm install`（`prepare` 脚本会自动配置 `core.hooksPath`），或手动执行 `git config core.hooksPath .githooks`。
+- CI 每次在 main 检测到新提交时，自动把最新 tag 的 patch 版本 +1，由机器人提交 `chore: bump version` 回写 main（同步 `package.json`、`package-lock.json`、`tauri.conf.json`、`Cargo.toml`、`Cargo.lock`）。
+- 随后自动完成 macOS 构建、ad-hoc 签名、压缩，并创建 tag 与 Release（`TokenBoard-v<版本>-macos.zip`，标记为 Latest）。
+- 机器人提交不会再次触发发布，不会循环；提交信息中包含 `[skip release]` 可跳过本次自动发布。
 
 ## 说明
 

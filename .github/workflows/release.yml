@@ -12,30 +12,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 先用便宜的 runner 判断 package.json 里的版本是否已发布过，未发布才占用 macOS runner
+  # 计算下一个版本号（最新 tag 的 patch +1），并判断本次 push 是否需要发布。
+  # 跳过条件：提交信息含 [skip release]，或提交本身是机器人的 bump 提交（防循环，双保险）。
   check:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.meta.outputs.version }}
-      exists: ${{ steps.meta.outputs.exists }}
+      next: ${{ steps.meta.outputs.next }}
+      skip: ${{ steps.meta.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - id: meta
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if git ls-remote --tags origin "refs/tags/v$VERSION" | grep -q .; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          LATEST=${LATEST#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+          NEXT="$MAJOR.$MINOR.$((PATCH + 1))"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "latest tag: v$LATEST -> next: v$NEXT"
+
+          AUTHOR=$(git log -1 --format='%an')
+          SUBJECT=$(git log -1 --format='%s')
+          if [[ "$SUBJECT" == *"[skip release]"* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$AUTHOR" = "github-actions[bot]" ] && [[ "$SUBJECT" == chore:\ bump\ version* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
   release:
     needs: check
-    if: needs.check.outputs.exists == 'false'
+    if: needs.check.outputs.skip == 'false'
     runs-on: macos-latest
     env:
-      VERSION: ${{ needs.check.outputs.version }}
+      VERSION: ${{ needs.check.outputs.next }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,9 +62,13 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # 只需维护 package.json 的版本号，CI 里同步到 tauri.conf.json 和 Cargo.toml（不提交回仓库）
-      - name: Sync version
+      # 由机器人把所有版本文件同步为新版本并回写 main；
+      # 用 GITHUB_TOKEN 推送不会再次触发 workflow，不会循环
+      - name: Bump version and push back
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version "$VERSION" --no-git-tag-version
           node -e "
             const fs = require('fs');
             const path = 'src-tauri/tauri.conf.json';
@@ -61,6 +77,11 @@ jobs:
             fs.writeFileSync(path, JSON.stringify(conf, null, 2) + '\n');
           "
           sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          cd src-tauri && cargo metadata --format-version 1 > /dev/null && cd ..
+          git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+          git commit -m "chore: bump version to $VERSION"
+          git push origin main
+          echo "BUMP_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - run: npm ci
 
@@ -78,6 +99,7 @@ jobs:
         with:
           tag_name: v${{ env.VERSION }}
           name: Token 看板 v${{ env.VERSION }}
+          target_commitish: ${{ env.BUMP_SHA }}
           generate_release_notes: true
           make_latest: true
           files: src-tauri/target/release/bundle/macos/TokenBoard-v${{ env.VERSION }}-macos.zip
