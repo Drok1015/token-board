@@ -103,3 +103,14 @@ jobs:
           generate_release_notes: true
           make_latest: true
           files: src-tauri/target/release/bundle/macos/TokenBoard-v${{ env.VERSION }}-macos.zip
+
+      # 只保留最近 2 个 Release（gh release list 按创建时间倒序），更早的连同 tag 一起删除
+      - name: Prune old releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | tail -n +3 | while read -r tag; do
+            echo "Pruning $tag"
+            gh release delete "$tag" --yes
+            git push origin ":refs/tags/$tag" || true
+          done
