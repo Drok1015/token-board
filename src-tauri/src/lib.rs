@@ -439,7 +439,7 @@ fn close_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-// CODEX 额度回到 100% 时弹系统对话框提醒；osascript 会等用户点击，后台运行不阻塞看板
+// CODEX 7d 额度较上次查询回升（重置）时弹系统对话框提醒；osascript 会等用户点击，后台运行不阻塞看板
 #[tauri::command]
 fn notify_codex_full() {
     let _ = Command::new("osascript")

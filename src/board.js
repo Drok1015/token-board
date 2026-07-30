@@ -56,7 +56,7 @@ export function mountBoard() {
   let settings = { ...DEFAULT_SETTINGS };
   let autoHideTimer = null;
   let refreshInProgress = false;
-  let codexFullAlerted = false;
+  let codexLastPercent = null;
   let lastRefreshAt = null;
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -275,19 +275,18 @@ export function mountBoard() {
     scheduleAutoHide();
   }
 
-  // CODEX 只看 7d 额度窗口：回到 100% 时弹系统提醒一次；低于 100% 后解除锁存，再次回到 100% 会重新提醒
-  async function maybeAlertCodexFull(lines) {
+  // CODEX 只看 7d 额度窗口：当前值比上次查询的值大（说明额度重置或回升）时弹系统提醒；
+  // 提醒后更新基线，同一水平不会重复提醒，再次变大时重新提醒。读取失败时不更新基线
+  async function maybeAlertCodexReset(lines) {
     const codex = lines.find((line) => line.provider === 'CODEX');
     if (!codex) return;
     const match = codex.value.match(/7d\s+(\d+)%/);
-    if (!match) return; // 没有 7d 数据或读取失败时不改变锁存状态
-    if (Number(match[1]) >= 100) {
-      if (codexFullAlerted) return;
-      codexFullAlerted = true;
+    if (!match) return;
+    const pct = Number(match[1]);
+    if (codexLastPercent !== null && pct > codexLastPercent) {
       await invoke('notify_codex_full');
-    } else {
-      codexFullAlerted = false;
     }
+    codexLastPercent = pct;
   }
 
   // 刷新成功后按「刚刚刷新 / N分钟前更新」展示，每分钟更新一次
@@ -322,7 +321,7 @@ export function mountBoard() {
       });
       lastRefreshAt = Date.now();
       renderRefreshElapsed();
-      await maybeAlertCodexFull(lines);
+      await maybeAlertCodexReset(lines);
     } catch (error) {
       console.error(error);
       Object.values(ids).forEach((id) => {
@@ -340,6 +339,11 @@ export function mountBoard() {
       text: '刷新',
       action: () => { refreshQuotas().catch(console.error); },
     });
+    const updateItem = await MenuItem.new({
+      id: 'update',
+      text: '检查更新',
+      action: () => { checkForUpdates(true).catch(console.error); },
+    });
     const settingsItem = await MenuItem.new({
       id: 'settings',
       text: '设置',
@@ -350,7 +354,7 @@ export function mountBoard() {
       text: '关闭',
       action: () => { invoke('close_app').catch(console.error); },
     });
-    return Menu.new({ items: [refreshItem, settingsItem, closeItem] });
+    return Menu.new({ items: [refreshItem, updateItem, settingsItem, closeItem] });
   }
 
   edgeTab.addEventListener('pointerdown', (event) => {
@@ -409,16 +413,20 @@ export function mountBoard() {
     .then((value) => applySettings(value))
     .catch(console.error);
 
-  // 启动及每 6 小时检查一次 GitHub 最新 Release，有新版本则后台下载安装并重启
-  async function checkForUpdates() {
+  // 启动及每 6 小时检查一次 GitHub 最新 Release，有新版本则后台下载安装并重启；右键菜单可手动触发
+  async function checkForUpdates(manual = false) {
     try {
       const update = await checkUpdate();
-      if (!update) return;
+      if (!update) {
+        if (manual) updated.textContent = '已是最新版本';
+        return;
+      }
       updated.textContent = `更新 v${update.version} 中…`;
       await update.downloadAndInstall();
       await relaunch();
     } catch (error) {
       console.error('检查更新失败', error);
+      if (manual) updated.textContent = '检查更新失败';
     }
   }
 
