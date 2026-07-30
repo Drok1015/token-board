@@ -157,10 +157,25 @@ async fn glm_line(client: &reqwest::Client, override_key: &str) -> QuotaLine {
     let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into(), plan: None } };
     let mut limits: Vec<&Value> = payload.pointer("/data/limits").and_then(Value::as_array).into_iter().flatten()
         .filter(|item| item["type"].as_str() == Some("TOKENS_LIMIT")).collect();
-    limits.sort_by_key(|item| number(item.get("nextResetTime")).unwrap_or(i64::MAX));
+    // 按窗口时长排序：unit 3 = 小时（number 个）、unit 6 = 周（number 个）。
+    // 不能按 nextResetTime 排：未使用的窗口不返回该字段，会被错误地排到最后
+    fn window_minutes(item: &Value) -> Option<i64> {
+        let count = number(item.get("number"))?;
+        match number(item.get("unit"))? {
+            3 => Some(count * 60),
+            6 => Some(count * 7 * 24 * 60),
+            _ => None,
+        }
+    }
+    let label = |item: &Value| match window_minutes(item) {
+        Some(minutes) if minutes % 1_440 == 0 => format!("{}d", minutes / 1_440),
+        Some(minutes) => format!("{}h", minutes / 60),
+        None => "?".to_owned(),
+    };
+    limits.sort_by_key(|item| window_minutes(item).unwrap_or(i64::MAX));
     let pct = |item: &Value| format!("{}%", 100 - number(item.get("percentage")).unwrap_or(100));
     let value = match (limits.first(), limits.last()) {
-        (Some(first), Some(last)) => format!("5h {} / 7d {}", pct(first), pct(last)),
+        (Some(first), Some(last)) => format!("{} {} / {} {}", label(first), pct(first), label(last), pct(last)),
         _ => "暂无额度".into(),
     };
     let plan = payload.pointer("/data/level").and_then(Value::as_str).map(str::to_owned);

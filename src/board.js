@@ -18,6 +18,8 @@ const EDGE_TAB_WIDTH = 24;
 const EDGE_TAB_HEIGHT = 72;
 const SNAP_DISTANCE = 16;
 const FADE_DURATION = 100;
+const CODEX_RESET_JUMP_THRESHOLD = 5; // 7d 额度单次回升超过该点数才可能视为重置（吸收滑动窗口 ±1~4 的自然抖动）
+const CODEX_RESET_BASELINE_MAX = 95; // 上次额度需低于该值才提醒：接近满额时的跳变基本是噪声，95% 以上的重置也没有提醒价值
 const DEFAULT_SETTINGS = {
   autoHide: false,
   hideDelaySeconds: 10,
@@ -301,9 +303,12 @@ export function mountBoard() {
     scheduleAutoHide();
   }
 
-  // CODEX 只看 7d 额度窗口：当前值比上次查询的值大（说明额度重置或回升）时弹系统提醒；
-  // 提醒后更新基线，同一水平不会重复提醒，再次变大时重新提醒。读取失败时不更新基线；
-  // 可在设置中关闭，关闭期间不跟踪基线，重新开启后从下一次查询重新建立基线
+  // CODEX 只看 7d 额度窗口，同时满足两个条件视为重置并弹系统提醒：
+  // 1) 上次额度低于 95%（95% 以上的重置没有提醒价值，也顺手挡掉接近满额时的噪声跳变）
+  // 2) 当前值比上次查询单次回升 >= 5（小幅回升是滑动窗口释放旧用量的自然抖动，不提醒；
+  //    真正的重置回到 100%，基线 <95% 时跳变必然 >= 6，不会漏报）
+  // 提醒后更新基线，同一水平不会重复提醒。读取失败时不更新基线；可在设置中关闭，
+  // 关闭期间不跟踪基线，重新开启后从下一次查询重新建立基线
   async function maybeAlertCodexReset(lines) {
     if (!settings.codexAlert) {
       codexLastPercent = null;
@@ -314,7 +319,8 @@ export function mountBoard() {
     const match = codex.value.match(/7d\s+(\d+)%/);
     if (!match) return;
     const pct = Number(match[1]);
-    if (codexLastPercent !== null && pct > codexLastPercent) {
+    const jumped = pct - (codexLastPercent ?? pct) >= CODEX_RESET_JUMP_THRESHOLD;
+    if (codexLastPercent !== null && codexLastPercent < CODEX_RESET_BASELINE_MAX && jumped) {
       await invoke('notify_codex_full');
     }
     codexLastPercent = pct;
