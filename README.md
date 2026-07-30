@@ -21,6 +21,8 @@ CODEX 行由本机已登录的 ChatGPT/Codex 获取。当前账号若只返回�
 
 自动隐藏设置保存在 macOS 应用配置目录中。关闭自动隐藏时，看板会保持展开；启用后，看板会在设定时间结束时收起到距离当前窗口最近的屏幕边缘。
 
+![Token 看板设置界面](public/screenshot-settings.png)
+
 ## 获取与配置凭据
 
 不要把任何 Key、Token 或 `auth.json` 提交到 Git。本项目只读取你本机已有的登录和配置。
