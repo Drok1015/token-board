@@ -7,6 +7,7 @@ const DEFAULT_SETTINGS = {
   visibleProviders: ['CODEX', 'KIMI', 'GLM', 'DEEPSEEK'],
   glmApiKey: '',
   deepseekApiKey: '',
+  autoUpdate: true,
 };
 
 const PROVIDERS = [
@@ -54,6 +55,13 @@ export function mountSettings() {
           </span>
           <input id="show-plans" type="checkbox">
         </label>
+        <label class="setting-row setting-toggle">
+          <span>
+            <strong>自动更新</strong>
+            <small>启动及每 6 小时检查新版本并自动安装，右键菜单可随时手动检查</small>
+          </span>
+          <input id="auto-update" type="checkbox">
+        </label>
         <div class="setting-row setting-providers-header">
           <span>
             <strong>显示的供应商</strong>
@@ -73,6 +81,7 @@ export function mountSettings() {
   const autoHide = document.querySelector('#auto-hide');
   const hideDelay = document.querySelector('#hide-delay');
   const showPlans = document.querySelector('#show-plans');
+  const autoUpdate = document.querySelector('#auto-update');
   const message = document.querySelector('#settings-message');
   const saveButton = document.querySelector('[type="submit"][form="settings-form"]');
 
@@ -150,6 +159,7 @@ export function mountSettings() {
           autoHide: autoHide.checked,
           hideDelaySeconds: seconds,
           showPlans: showPlans.checked,
+          autoUpdate: autoUpdate.checked,
           visibleProviders,
           glmApiKey: providerRows.find(({ provider }) => provider.keyField === 'glmApiKey').keyInput.value.trim(),
           deepseekApiKey: providerRows.find(({ provider }) => provider.keyField === 'deepseekApiKey').keyInput.value.trim(),
@@ -168,6 +178,7 @@ export function mountSettings() {
       autoHide.checked = Boolean(settings.autoHide);
       hideDelay.value = String(settings.hideDelaySeconds);
       showPlans.checked = Boolean(settings.showPlans);
+      autoUpdate.checked = Boolean(settings.autoUpdate);
       const visible = Array.isArray(settings.visibleProviders) && settings.visibleProviders.length > 0
         ? settings.visibleProviders
         : DEFAULT_SETTINGS.visibleProviders;

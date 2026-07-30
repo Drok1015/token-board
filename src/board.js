@@ -13,7 +13,7 @@ import {
 const COMPACT_BOARD_WIDTH = 240;
 const EXPANDED_BOARD_WIDTH = 300;
 const BOARD_HEIGHT = 175;
-const ROW_HEIGHT = 25;
+const BOARD_VERTICAL_MARGIN = 24; // 窗口比屏幕体高出的上下透明边距（阴影留位）
 const EDGE_TAB_WIDTH = 24;
 const EDGE_TAB_HEIGHT = 72;
 const SNAP_DISTANCE = 16;
@@ -23,6 +23,7 @@ const DEFAULT_SETTINGS = {
   hideDelaySeconds: 10,
   showPlans: true,
   visibleProviders: ['CODEX', 'KIMI', 'GLM', 'DEEPSEEK'],
+  autoUpdate: true,
 };
 
 export function mountBoard() {
@@ -55,9 +56,11 @@ export function mountBoard() {
   let ignoreTabClick = false;
   let settings = { ...DEFAULT_SETTINGS };
   let autoHideTimer = null;
+  let updateTimer = null;
   let refreshInProgress = false;
   let codexLastPercent = null;
   let lastRefreshAt = null;
+  let boardHeight = BOARD_HEIGHT; // 最近一次的实测窗口高度；贴边隐藏时 DOM 不可见，用缓存值
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
   const wait = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
@@ -78,8 +81,11 @@ export function mountBoard() {
     return list.length > 0 ? list : DEFAULT_SETTINGS.visibleProviders;
   }
 
+  // 高度不写死：实测屏幕体高度加透明边距；行数增减、字号或样式变化都会自动跟随
   function currentBoardHeight() {
-    return BOARD_HEIGHT - (DEFAULT_SETTINGS.visibleProviders.length - visibleProviders().length) * ROW_HEIGHT;
+    const measured = document.querySelector('.screen').getBoundingClientRect().height;
+    if (measured > 0) boardHeight = Math.ceil(measured) + BOARD_VERTICAL_MARGIN;
+    return boardHeight;
   }
 
   async function resizeBoardForSettings() {
@@ -126,6 +132,18 @@ export function mountBoard() {
     });
     await resizeBoardForSettings();
     scheduleAutoHide();
+    scheduleAutoUpdate();
+  }
+
+  // 自动更新默认关闭：开启后立即检查一次并每 6 小时轮询；关闭时清除轮询（右键菜单手动检查不受影响）
+  function scheduleAutoUpdate() {
+    if (updateTimer !== null) {
+      window.clearInterval(updateTimer);
+      updateTimer = null;
+    }
+    if (!settings.autoUpdate) return;
+    checkForUpdates().catch(console.error);
+    updateTimer = window.setInterval(() => { checkForUpdates().catch(console.error); }, 6 * 60 * 60 * 1000);
   }
 
   function scheduleAutoHide() {
@@ -413,8 +431,10 @@ export function mountBoard() {
     .then((value) => applySettings(value))
     .catch(console.error);
 
-  // 启动及每 6 小时检查一次 GitHub 最新 Release，有新版本则后台下载安装并重启；右键菜单可手动触发
+  // 检查 GitHub 最新 Release，有新版本则后台下载安装并重启；定时调用由 scheduleAutoUpdate 控制，右键菜单可随时手动触发
+  // 双保险：未开启自动更新时，非手动触发一律直接返回
   async function checkForUpdates(manual = false) {
+    if (!manual && !settings.autoUpdate) return;
     try {
       const update = await checkUpdate();
       if (!update) {
@@ -433,6 +453,4 @@ export function mountBoard() {
   refreshQuotas().catch(console.error);
   window.setInterval(() => { refreshQuotas().catch(console.error); }, 5 * 60 * 1000);
   window.setInterval(renderRefreshElapsed, 60 * 1000);
-  checkForUpdates().catch(console.error);
-  window.setInterval(() => { checkForUpdates().catch(console.error); }, 6 * 60 * 60 * 1000);
 }

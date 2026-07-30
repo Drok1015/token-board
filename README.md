@@ -81,7 +81,7 @@ src-tauri/target/release/bundle/macos/Token 看板.app
 
 ## 自动更新
 
-从 v0.2.10 起内置自动更新：应用启动时及每 6 小时检查一次 GitHub 最新 Release 的 `latest.json`，发现新版本会在后台下载并安装，完成后自动重启看板。更新包使用 minisign 签名（公钥内置在 `tauri.conf.json`），CI 发布时用仓库 secret `TAURI_SIGNING_PRIVATE_KEY` 签名。
+从 v0.2.10 起内置自动更新（默认开启，可在设置页关闭「自动更新」）。开启后应用启动时及每 6 小时检查一次 GitHub 最新 Release 的 `latest.json`，发现新版本会在后台下载并安装，完成后自动重启看板；关闭后不会再自动检查或安装，但右键菜单的「检查更新」仍可随时手动升级。更新包使用 minisign 签名（公钥内置在 `tauri.conf.json`），CI 发布时用仓库 secret `TAURI_SIGNING_PRIVATE_KEY` 签名。
 
 本地打包如需生成更新产物，先导出私钥：
 

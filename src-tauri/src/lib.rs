@@ -30,6 +30,7 @@ struct BoardSettings {
     visible_providers: Vec<String>,
     glm_api_key: String,
     deepseek_api_key: String,
+    auto_update: bool,
 }
 
 impl Default for BoardSettings {
@@ -41,6 +42,7 @@ impl Default for BoardSettings {
             visible_providers: ALL_PROVIDERS.map(str::to_owned).to_vec(),
             glm_api_key: String::new(),
             deepseek_api_key: String::new(),
+            auto_update: true,
         }
     }
 }
@@ -525,6 +527,7 @@ mod tests {
         assert_eq!(settings.visible_providers, ALL_PROVIDERS.map(str::to_owned).to_vec());
         assert!(settings.glm_api_key.is_empty());
         assert!(settings.deepseek_api_key.is_empty());
+        assert!(settings.auto_update);
     }
 
     #[test]

@@ -11,7 +11,7 @@ macOS 桌面悬浮 Token/额度看板（Tauri 2 + Vite），展示 CODEX、KIMI�
 ## 发布流程（全自动）
 
 - 代码改动 push 到 `main` 即自动发版：CI（`.github/workflows/release.yml`）把最新 tag 的 patch 版本 +1，由机器人提交 `chore: bump version` 回写 main（同步 5 个版本文件），随后完成 macOS 构建、ad-hoc 签名并发布 Release（`TokenBoard-v<版本>-macos.zip` 及 updater 更新包 `.app.tar.gz` + `latest.json`，Latest）。发版后自动清理旧 Release：只保留最近 2 个，更早的连同 tag 一起删除。
-- 自动更新基于 tauri-plugin-updater：应用启动及每 6 小时读取 `releases/latest/download/latest.json`，有新版即后台安装并重启。签名私钥存于仓库 secret `TAURI_SIGNING_PRIVATE_KEY`（本地备份 `~/.tauri/token-board.key`，未入 Git），公钥内置 `tauri.conf.json`；本地打包需同时导出 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`。
+- 自动更新基于 tauri-plugin-updater：默认开启（设置页可关闭），开启时应用启动及每 6 小时读取 `releases/latest/download/latest.json`，有新版即后台安装并重启；关闭时不做任何自动检查，右键菜单「检查更新」仍可手动触发。签名私钥存于仓库 secret `TAURI_SIGNING_PRIVATE_KEY`（本地备份 `~/.tauri/token-board.key`，未入 Git），公钥内置 `tauri.conf.json`；本地打包需同时导出 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`。
 - 提交信息包含 `[skip release]` 可跳过本次自动发布（纯文档/配置改动时使用）。
 - 不要手动修改任何文件里的版本号；版本以 Releases 最新 tag 为准。
 
