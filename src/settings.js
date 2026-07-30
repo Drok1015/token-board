@@ -8,6 +8,10 @@ const DEFAULT_SETTINGS = {
   glmApiKey: '',
   deepseekApiKey: '',
   autoUpdate: true,
+  trayProvider: 'CODEX',
+  codexAlert: true,
+  showBoard: true,
+  showTray: true,
 };
 
 const PROVIDERS = [
@@ -50,6 +54,13 @@ export function mountSettings() {
         </label>
         <label class="setting-row setting-toggle">
           <span>
+            <strong>CODEX 重置提醒</strong>
+            <small>7d 额度比上次查询回升时弹系统对话框</small>
+          </span>
+          <input id="codex-alert" type="checkbox">
+        </label>
+        <label class="setting-row setting-toggle">
+          <span>
             <strong>显示订阅套餐</strong>
             <small>在供应商名称后显示 Plus、Allegretto 等套餐标签</small>
           </span>
@@ -62,6 +73,28 @@ export function mountSettings() {
           </span>
           <input id="auto-update" type="checkbox">
         </label>
+        <div class="setting-group">
+          <div class="setting-row setting-providers-header">
+            <span>
+              <strong>显示位置</strong>
+              <small>至少保留一个；任务栏指屏幕顶部菜单栏状态区</small>
+            </span>
+          </div>
+          <label class="setting-row setting-toggle provider-row">
+            <span>
+              <strong>面板</strong>
+              <small>桌面悬浮的 Token 看板窗口</small>
+            </span>
+            <input id="show-board" type="checkbox">
+          </label>
+          <label class="setting-row setting-toggle provider-row">
+            <span>
+              <strong>任务栏</strong>
+              <small>菜单栏状态区的彩色额度文字</small>
+            </span>
+            <input id="show-tray" type="checkbox">
+          </label>
+        </div>
         <div class="setting-row setting-providers-header">
           <span>
             <strong>显示的供应商</strong>
@@ -80,10 +113,16 @@ export function mountSettings() {
   const form = document.querySelector('#settings-form');
   const autoHide = document.querySelector('#auto-hide');
   const hideDelay = document.querySelector('#hide-delay');
+  const codexAlert = document.querySelector('#codex-alert');
   const showPlans = document.querySelector('#show-plans');
   const autoUpdate = document.querySelector('#auto-update');
+  const showBoard = document.querySelector('#show-board');
+  const showTray = document.querySelector('#show-tray');
+  const delayRow = document.querySelector('.setting-delay');
   const message = document.querySelector('#settings-message');
   const saveButton = document.querySelector('[type="submit"][form="settings-form"]');
+  // 托盘供应商在托盘菜单里修改，设置页不展示；保存时原样带回，避免被默认值覆盖
+  let savedTrayProvider = DEFAULT_SETTINGS.trayProvider;
 
   // 每个供应商一行；GLM / DeepSeek 勾选时在下方展开 API key 输入框（留空则从 cc-switch 读取）
   const providerList = document.querySelector('#provider-list');
@@ -125,8 +164,10 @@ export function mountSettings() {
     });
   }
 
+  // 展示时长只在勾选自动隐藏时显示
   function syncDelayState() {
     hideDelay.disabled = !autoHide.checked;
+    delayRow.classList.toggle('visible', autoHide.checked);
   }
 
   autoHide.addEventListener('change', syncDelayState);
@@ -150,6 +191,10 @@ export function mountSettings() {
       message.textContent = '至少选择一个供应商';
       return;
     }
+    if (!showBoard.checked && !showTray.checked) {
+      message.textContent = '面板和任务栏至少保留一个';
+      return;
+    }
 
     saveButton.disabled = true;
     message.textContent = '正在保存…';
@@ -160,9 +205,13 @@ export function mountSettings() {
           hideDelaySeconds: seconds,
           showPlans: showPlans.checked,
           autoUpdate: autoUpdate.checked,
+          codexAlert: codexAlert.checked,
+          showBoard: showBoard.checked,
+          showTray: showTray.checked,
           visibleProviders,
           glmApiKey: providerRows.find(({ provider }) => provider.keyField === 'glmApiKey').keyInput.value.trim(),
           deepseekApiKey: providerRows.find(({ provider }) => provider.keyField === 'deepseekApiKey').keyInput.value.trim(),
+          trayProvider: savedTrayProvider,
         },
       });
     } catch (error) {
@@ -175,10 +224,14 @@ export function mountSettings() {
   invoke('get_settings')
     .then((value) => {
       const settings = { ...DEFAULT_SETTINGS, ...value };
+      savedTrayProvider = settings.trayProvider;
       autoHide.checked = Boolean(settings.autoHide);
       hideDelay.value = String(settings.hideDelaySeconds);
       showPlans.checked = Boolean(settings.showPlans);
       autoUpdate.checked = Boolean(settings.autoUpdate);
+      codexAlert.checked = Boolean(settings.codexAlert);
+      showBoard.checked = Boolean(settings.showBoard);
+      showTray.checked = Boolean(settings.showTray);
       const visible = Array.isArray(settings.visibleProviders) && settings.visibleProviders.length > 0
         ? settings.visibleProviders
         : DEFAULT_SETTINGS.visibleProviders;

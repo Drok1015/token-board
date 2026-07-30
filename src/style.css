@@ -42,7 +42,10 @@ body.settings-mode {
 .seconds-input input:focus { border-color: #258c52; box-shadow: 0 0 0 3px rgb(37 140 82 / 16%); }
 .seconds-input input:disabled { color: #9a9a9f; background: #ededf0; }
 .setting-providers-header { min-height: 46px; padding-bottom: 6px; }
+.setting-group { border-top: 1px solid #c9c9cf; border-bottom: 1px solid #c9c9cf; background: rgb(0 0 0 / 4%); }
 .provider-row { min-height: 42px; padding-top: 6px; padding-bottom: 6px; }
+.setting-delay { display: none; }
+.setting-delay.visible { display: flex; }
 .apikey-row { display: none; min-height: 42px; padding: 6px 13px 6px 26px; background: rgb(0 0 0 / 2%); }
 .apikey-row.visible { display: flex; }
 .apikey-row input { width: 150px; height: 26px; padding: 3px 7px; border: 1px solid #bcbcc2; border-radius: 6px; color: #222; background: #fff; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; }

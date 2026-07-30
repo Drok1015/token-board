@@ -24,6 +24,8 @@ const DEFAULT_SETTINGS = {
   showPlans: true,
   visibleProviders: ['CODEX', 'KIMI', 'GLM', 'DEEPSEEK'],
   autoUpdate: true,
+  codexAlert: true,
+  showBoard: true,
 };
 
 export function mountBoard() {
@@ -130,6 +132,12 @@ export function mountBoard() {
     document.querySelectorAll('.quota-row[data-provider]').forEach((row) => {
       row.classList.toggle('provider-hidden', !visible.includes(row.dataset.provider));
     });
+    // 显示位置：面板关闭时隐藏悬浮窗（任务栏仍可通过托盘菜单打开设置）
+    if (settings.showBoard) {
+      await appWindow.show();
+    } else {
+      await appWindow.hide();
+    }
     await resizeBoardForSettings();
     scheduleAutoHide();
     scheduleAutoUpdate();
@@ -294,8 +302,13 @@ export function mountBoard() {
   }
 
   // CODEX 只看 7d 额度窗口：当前值比上次查询的值大（说明额度重置或回升）时弹系统提醒；
-  // 提醒后更新基线，同一水平不会重复提醒，再次变大时重新提醒。读取失败时不更新基线
+  // 提醒后更新基线，同一水平不会重复提醒，再次变大时重新提醒。读取失败时不更新基线；
+  // 可在设置中关闭，关闭期间不跟踪基线，重新开启后从下一次查询重新建立基线
   async function maybeAlertCodexReset(lines) {
+    if (!settings.codexAlert) {
+      codexLastPercent = null;
+      return;
+    }
     const codex = lines.find((line) => line.provider === 'CODEX');
     if (!codex) return;
     const match = codex.value.match(/7d\s+(\d+)%/);
@@ -340,6 +353,7 @@ export function mountBoard() {
       lastRefreshAt = Date.now();
       renderRefreshElapsed();
       await maybeAlertCodexReset(lines);
+      invoke('update_tray', { lines }).catch(console.error);
     } catch (error) {
       console.error(error);
       Object.values(ids).forEach((id) => {
@@ -425,6 +439,16 @@ export function mountBoard() {
 
   listen('settings-updated', ({ payload }) => {
     applySettings(payload).catch(console.error);
+  }).catch(console.error);
+
+  // 托盘菜单的「检查更新」经 Rust 转发到这里执行
+  listen('tray-check-updates', () => {
+    checkForUpdates(true).catch(console.error);
+  }).catch(console.error);
+
+  // 托盘菜单的「刷新」
+  listen('tray-refresh', () => {
+    refreshQuotas().catch(console.error);
   }).catch(console.error);
 
   invoke('get_settings')

@@ -5,9 +5,14 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{Emitter, Manager};
+use tauri::{
+    menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder},
+    tray::TrayIconBuilder,
+    Emitter, Manager,
+};
 
 const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 
@@ -31,6 +36,10 @@ struct BoardSettings {
     glm_api_key: String,
     deepseek_api_key: String,
     auto_update: bool,
+    tray_provider: String,
+    codex_alert: bool,
+    show_board: bool,
+    show_tray: bool,
 }
 
 impl Default for BoardSettings {
@@ -43,6 +52,10 @@ impl Default for BoardSettings {
             glm_api_key: String::new(),
             deepseek_api_key: String::new(),
             auto_update: true,
+            tray_provider: "CODEX".into(),
+            codex_alert: true,
+            show_board: true,
+            show_tray: true,
         }
     }
 }
@@ -53,6 +66,13 @@ impl BoardSettings {
         self.visible_providers.retain(|name| ALL_PROVIDERS.contains(&name.as_str()));
         self.glm_api_key = self.glm_api_key.trim().to_owned();
         self.deepseek_api_key = self.deepseek_api_key.trim().to_owned();
+        if !ALL_PROVIDERS.contains(&self.tray_provider.as_str()) {
+            self.tray_provider = "CODEX".into();
+        }
+        // 面板和任务栏至少保留一个显示位置
+        if !self.show_board && !self.show_tray {
+            self.show_board = true;
+        }
         self
     }
 }
@@ -386,20 +406,287 @@ fn get_settings(app: tauri::AppHandle) -> BoardSettings {
     read_settings(&app)
 }
 
+fn persist_settings(app: &tauri::AppHandle, settings: &BoardSettings) -> Result<(), String> {
+    let path = settings_path(app)?;
+    let parent = path.parent().ok_or_else(|| "设置保存位置无效".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建设置目录：{error}"))?;
+    let data = serde_json::to_vec_pretty(settings).map_err(|error| format!("无法序列化设置：{error}"))?;
+    fs::write(path, data).map_err(|error| format!("无法保存设置：{error}"))
+}
+
+// 面板显隐直接由 Rust 控制，不依赖前端事件是否到达
+fn apply_board_visibility(app: &tauri::AppHandle, show_board: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        if show_board {
+            let _ = window.show();
+        } else {
+            let _ = window.hide();
+        }
+    }
+}
+
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: BoardSettings) -> Result<(), String> {
     let settings = settings.normalized();
-    let path = settings_path(&app)?;
-    let parent = path.parent().ok_or_else(|| "设置保存位置无效".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("无法创建设置目录：{error}"))?;
-    let data = serde_json::to_vec_pretty(&settings).map_err(|error| format!("无法序列化设置：{error}"))?;
-    fs::write(path, data).map_err(|error| format!("无法保存设置：{error}"))?;
+    persist_settings(&app, &settings)?;
+    refresh_tray(&app);
+    apply_board_visibility(&app, settings.show_board);
     app.emit_to("main", "settings-updated", settings)
         .map_err(|error| format!("无法应用设置：{error}"))?;
     if let Some(window) = app.get_webview_window("settings") {
         window.close().map_err(|error| format!("无法关闭设置窗口：{error}"))?;
     }
     Ok(())
+}
+
+// ---------- 状态栏（托盘） ----------
+
+#[derive(Clone, Deserialize)]
+struct TrayQuotaLine {
+    provider: String,
+    value: String,
+}
+
+#[derive(Default)]
+struct TrayState {
+    last_lines: Vec<TrayQuotaLine>,
+}
+
+// 状态栏文案：有百分比窗口按顺序拼接（前面 5h、后面 7d），
+// 无百分比时取最后一个词（如 ¥7.38、读取失败）。仅作为字体渲染失败时的纯文本回退
+fn tray_title(provider: &str, value: &str) -> String {
+    let provider = provider.to_uppercase();
+    let percents: Vec<&str> = value
+        .split(" / ")
+        .filter_map(|part| part.rsplit_once(' ').map(|(_, tail)| tail))
+        .filter(|tail| tail.ends_with('%'))
+        .collect();
+    if percents.is_empty() {
+        let tail = value.rsplit_once(' ').map(|(_, tail)| tail).unwrap_or(value);
+        format!("{provider} {tail}")
+    } else {
+        format!("{provider} {}", percents.join(" "))
+    }
+}
+
+// 托盘文字颜色，阈值与看板一致：>60% 白，<=60% 橙，<=30% 红
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayColor {
+    White,
+    Orange,
+    Red,
+}
+
+impl TrayColor {
+    fn for_pct(pct: u64) -> Self {
+        if pct <= 30 { TrayColor::Red } else if pct <= 60 { TrayColor::Orange } else { TrayColor::White }
+    }
+
+    fn rgb(self) -> [u8; 3] {
+        match self {
+            TrayColor::White => [245, 245, 245],
+            TrayColor::Orange => [235, 138, 10],
+            TrayColor::Red => [255, 69, 58],
+        }
+    }
+}
+
+// 状态栏彩色文字分段：供应商名固定白色且字号更大，各窗口百分比各自着色；元素间距在渲染时统一加
+fn tray_segments(provider: &str, value: &str) -> Vec<(String, TrayColor, f32)> {
+    let provider = provider.to_uppercase();
+    let parts: Vec<(&str, u64)> = value
+        .split(" / ")
+        .filter_map(|part| part.rsplit_once(' ').map(|(_, tail)| tail))
+        .filter(|tail| tail.ends_with('%'))
+        .filter_map(|tail| tail.trim_end_matches('%').parse::<u64>().ok().map(|pct| (tail, pct)))
+        .collect();
+    let mut segments = vec![(provider, TrayColor::White, TRAY_NAME_FONT_PX)];
+    if parts.is_empty() {
+        let tail = value.rsplit_once(' ').map(|(_, tail)| tail).unwrap_or(value);
+        let color = if value.contains("失败") || value.starts_with('未') { TrayColor::Red } else { TrayColor::White };
+        segments.push((tail.to_owned(), color, TRAY_FONT_PX));
+        return segments;
+    }
+    for (tail, pct) in parts {
+        segments.push((tail.to_owned(), TrayColor::for_pct(pct), TRAY_FONT_PX));
+    }
+    segments
+}
+
+const TRAY_ICON_HEIGHT: u32 = 36; // 18pt @2x，tray-icon 会缩放到 18pt 高
+const TRAY_FONT_PX: f32 = 26.0;
+const TRAY_NAME_FONT_PX: f32 = 22.0; // 供应商名字号比额度小
+const TRAY_ELEMENT_GAP: f32 = 16.0; // 元素之间的额外间距
+const TRAY_PAD_X: f32 = 20.0; // 蒙版左右内边距
+const TRAY_BASELINE: f32 = 26.0;
+const TRAY_MASK_ALPHA: u8 = 45; // 文字背后的浅色半透明圆角蒙版
+
+// 在 RGBA 缓冲上铺一层圆角矩形（胶囊形）深色蒙版，带抗锯齿边缘
+fn fill_rounded_mask(rgba: &mut [u8], width: u32, height: u32, alpha: u8) {
+    let (w, h) = (width as f32, height as f32);
+    let radius = h / 2.0;
+    for y in 0..height {
+        for x in 0..width {
+            let cx = x as f32 + 0.5;
+            let cy = y as f32 + 0.5;
+            let qx = (cx - w / 2.0).abs() - (w / 2.0 - radius);
+            let qy = (cy - h / 2.0).abs() - (h / 2.0 - radius);
+            let distance = qx.max(qy).min(0.0) + qx.max(0.0).hypot(qy.max(0.0)) - radius;
+            let coverage = (0.5 - distance).clamp(0.0, 1.0);
+            let a = (alpha as f32 * coverage).round() as u8;
+            if a == 0 {
+                continue;
+            }
+            let offset = ((y * width + x) * 4) as usize;
+            rgba[offset + 3] = a; // 蒙版为纯黑，只写 alpha
+        }
+    }
+}
+
+fn tray_font() -> Option<&'static fontdue::Font> {
+    static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        let data = fs::read("/System/Library/Fonts/Helvetica.ttc").ok()?;
+        // Helvetica.ttc 合集中 index 1 为 Bold 字重
+        fontdue::Font::from_bytes(data, fontdue::FontSettings { collection_index: 1, ..Default::default() }).ok()
+    })
+    .as_ref()
+}
+
+// 托盘标题不支持富文本，把彩色文字渲染成 RGBA 图片设为托盘图标（文字即图标）
+fn render_tray_icon(segments: &[(String, TrayColor, f32)]) -> Option<tauri::image::Image<'static>> {
+    let font = tray_font()?;
+    let mut glyphs = vec![];
+    let mut pen_x = TRAY_PAD_X;
+    for (text, color, px) in segments {
+        for ch in text.chars() {
+            let (metrics, bitmap) = font.rasterize(ch, *px);
+            glyphs.push((metrics, bitmap, *color, pen_x.round() as i32));
+            pen_x += metrics.advance_width;
+        }
+        pen_x += TRAY_ELEMENT_GAP;
+    }
+    let width = (pen_x - TRAY_ELEMENT_GAP + TRAY_PAD_X).ceil().max(1.0) as u32;
+    let mut rgba = vec![0u8; (width * TRAY_ICON_HEIGHT * 4) as usize];
+    fill_rounded_mask(&mut rgba, width, TRAY_ICON_HEIGHT, TRAY_MASK_ALPHA);
+    for (metrics, bitmap, color, x0) in glyphs {
+        let top = (TRAY_BASELINE - metrics.ymin as f32 - metrics.height as f32).round() as i32;
+        let left = x0 + metrics.xmin;
+        let [r, g, b] = color.rgb();
+        for (index, coverage) in bitmap.iter().enumerate() {
+            if *coverage == 0 {
+                continue;
+            }
+            let px = left + (index % metrics.width) as i32;
+            let py = top + (index / metrics.width) as i32;
+            if px < 0 || py < 0 || px >= width as i32 || py >= TRAY_ICON_HEIGHT as i32 {
+                continue;
+            }
+            // 文字按「源覆盖」规则与蒙版合成，边缘抗锯齿处正确透出底色
+            let offset = ((py as u32 * width + px as u32) * 4) as usize;
+            let src_a = *coverage as f32 / 255.0;
+            let dst_a = rgba[offset + 3] as f32 / 255.0;
+            let out_a = src_a + dst_a * (1.0 - src_a);
+            if out_a <= 0.0 {
+                continue;
+            }
+            rgba[offset] = (r as f32 * src_a / out_a).round() as u8;
+            rgba[offset + 1] = (g as f32 * src_a / out_a).round() as u8;
+            rgba[offset + 2] = (b as f32 * src_a / out_a).round() as u8;
+            rgba[offset + 3] = (out_a * 255.0).round() as u8;
+        }
+    }
+    Some(tauri::image::Image::new_owned(rgba, width, TRAY_ICON_HEIGHT))
+}
+
+fn tray_menu(app: &tauri::AppHandle, settings: &BoardSettings) -> tauri::Result<Menu<tauri::Wry>> {
+    let mut builder = MenuBuilder::new(app);
+    for name in ALL_PROVIDERS
+        .iter()
+        .filter(|name| settings.visible_providers.iter().any(|visible| visible.as_str() == **name))
+    {
+        let item = CheckMenuItemBuilder::with_id(format!("tray-provider-{name}"), *name)
+            .checked(settings.tray_provider == *name)
+            .build(app)?;
+        builder = builder.item(&item);
+    }
+    let refresh_item = MenuItemBuilder::with_id("tray-refresh", "刷新").build(app)?;
+    let settings_item = MenuItemBuilder::with_id("tray-settings", "设置").build(app)?;
+    let update_item = MenuItemBuilder::with_id("tray-update", "检查更新").build(app)?;
+    let quit_item = MenuItemBuilder::with_id("tray-quit", "退出").build(app)?;
+    builder.separator().items(&[&refresh_item, &settings_item, &update_item, &quit_item]).build()
+}
+
+fn refresh_tray_title(app: &tauri::AppHandle) {
+    let settings = read_settings(app);
+    let lines = app.state::<Mutex<TrayState>>().lock().unwrap().last_lines.clone();
+    let line = lines
+        .iter()
+        .find(|line| line.provider == settings.tray_provider)
+        .or(lines.first());
+    let Some(tray) = app.tray_by_id("tray") else { return };
+    let _ = tray.set_visible(settings.show_tray);
+    match line {
+        Some(line) => match render_tray_icon(&tray_segments(&line.provider, &line.value)) {
+            Some(image) => {
+                let _ = tray.set_icon(Some(image));
+                let _ = tray.set_icon_as_template(false);
+                let _ = tray.set_title(Some(""));
+            }
+            None => {
+                let _ = tray.set_title(Some(tray_title(&line.provider, &line.value)));
+            }
+        },
+        None => {
+            let _ = tray.set_title(Some("TOKEN"));
+        }
+    }
+}
+
+// 设置变化后重建托盘菜单（供应商勾选列表可能变了）、应用显隐并刷新标题
+fn refresh_tray(app: &tauri::AppHandle) {
+    let settings = read_settings(app);
+    if let Some(tray) = app.tray_by_id("tray") {
+        let _ = tray.set_visible(settings.show_tray);
+        if let Ok(menu) = tray_menu(app, &settings) {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+    refresh_tray_title(app);
+}
+
+// 看板每次刷新额度后推送最新数据，托盘据此更新标题
+#[tauri::command]
+fn update_tray(app: tauri::AppHandle, lines: Vec<TrayQuotaLine>) {
+    app.state::<Mutex<TrayState>>().lock().unwrap().last_lines = lines;
+    refresh_tray_title(&app);
+}
+
+fn handle_tray_menu_event(app: &tauri::AppHandle, id: &str) {
+    if let Some(provider) = id.strip_prefix("tray-provider-") {
+        let settings = read_settings(app);
+        let settings = BoardSettings { tray_provider: provider.to_owned(), ..settings }.normalized();
+        let _ = persist_settings(app, &settings);
+        refresh_tray(app);
+        return;
+    }
+    match id {
+        "tray-refresh" => {
+            let _ = app.emit_to("main", "tray-refresh", ());
+        }
+        "tray-settings" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = open_settings(app).await;
+            });
+        }
+        // 更新检查在前端执行（updater 插件的 JS API），转发给主窗口
+        "tray-update" => {
+            let _ = app.emit_to("main", "tray-check-updates", ());
+        }
+        "tray-quit" => app.exit(0),
+        _ => {}
+    }
 }
 
 #[tauri::command]
@@ -465,6 +752,21 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(Mutex::new(TrayState::default()))
+        .setup(|app| {
+            let settings = read_settings(app.handle());
+            let menu = tray_menu(app.handle(), &settings)?;
+            TrayIconBuilder::with_id("tray")
+                .title("TOKEN")
+                .menu(&menu)
+                .on_menu_event(|tray, event| handle_tray_menu_event(tray.app_handle(), event.id().as_ref()))
+                .build(app)?;
+            if let Some(tray) = app.tray_by_id("tray") {
+                let _ = tray.set_visible(settings.show_tray);
+            }
+            apply_board_visibility(app.handle(), settings.show_board);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             open_app,
             get_quotas,
@@ -473,7 +775,8 @@ pub fn run() {
             open_settings,
             close_settings,
             close_app,
-            notify_codex_full
+            notify_codex_full,
+            update_tray
         ])
         .run(tauri::generate_context!())
         .expect("启动 Token 看板失败");
@@ -542,6 +845,57 @@ mod tests {
         assert_eq!(settings.visible_providers, ["GLM", "KIMI"]);
         assert_eq!(settings.glm_api_key, "sk-glm");
         assert_eq!(settings.deepseek_api_key, "sk-deepseek");
+    }
+
+    #[test]
+    fn normalized_settings_keep_at_least_one_display_target() {
+        let settings = BoardSettings { show_board: false, show_tray: false, ..BoardSettings::default() }.normalized();
+        assert!(settings.show_board);
+        let settings = BoardSettings { show_board: false, show_tray: true, ..BoardSettings::default() }.normalized();
+        assert!(!settings.show_board);
+        assert!(settings.show_tray);
+    }
+
+    #[test]
+    fn tray_title_joins_percent_windows_and_falls_back_to_last_word() {
+        assert_eq!(tray_title("CODEX", "7d 97%"), "CODEX 97%");
+        assert_eq!(tray_title("KIMI", "5h 85% / 7d 85%"), "KIMI 85% 85%");
+        assert_eq!(tray_title("DEEPSEEK", "余额 ¥7.38"), "DEEPSEEK ¥7.38");
+        assert_eq!(tray_title("CODEX", "读取失败"), "CODEX 读取失败");
+    }
+
+    #[test]
+    fn tray_segments_name_stays_white_and_each_window_colored() {
+        let segments = tray_segments("GLM", "5h 90% / 7d 45%");
+        assert_eq!(
+            segments,
+            vec![
+                ("GLM".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
+                ("90%".to_owned(), TrayColor::White, TRAY_FONT_PX),
+                ("45%".to_owned(), TrayColor::Orange, TRAY_FONT_PX),
+            ]
+        );
+        assert_eq!(
+            tray_segments("CODEX", "7d 22%"),
+            vec![
+                ("CODEX".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
+                ("22%".to_owned(), TrayColor::Red, TRAY_FONT_PX)
+            ]
+        );
+        assert_eq!(
+            tray_segments("DEEPSEEK", "余额 ¥7.38"),
+            vec![
+                ("DEEPSEEK".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
+                ("¥7.38".to_owned(), TrayColor::White, TRAY_FONT_PX)
+            ]
+        );
+        assert_eq!(
+            tray_segments("CODEX", "读取失败"),
+            vec![
+                ("CODEX".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
+                ("读取失败".to_owned(), TrayColor::Red, TRAY_FONT_PX)
+            ]
+        );
     }
 
     #[test]
