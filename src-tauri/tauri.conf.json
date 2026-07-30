@@ -32,6 +32,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "app"
     ],
@@ -40,6 +41,14 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNGRDMwQjVBNzNDMTVFQkUKUldTK1hzRnpXZ3ZUUHcxWmJpaXJHNEV1dk1zemFqYU5FWk14bXB1M3VZNDJDajVJUklqSkpiaHUK",
+      "endpoints": [
+        "https://github.com/Drok1015/token-board/releases/latest/download/latest.json"
+      ]
     }
   }
 }

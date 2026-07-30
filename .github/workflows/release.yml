@@ -48,6 +48,8 @@ jobs:
     runs-on: macos-latest
     env:
       VERSION: ${{ needs.check.outputs.next }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -93,6 +95,20 @@ jobs:
           codesign --force --deep --sign - "Token 看板.app"
           codesign --verify "Token 看板.app"
           ditto -c -k --keepParent "Token 看板.app" "TokenBoard-v$VERSION-macos.zip"
+          # tauri build 已生成并签名 updater 产物，改名为 ASCII 文件名便于 Release 下载
+          mv "Token 看板.app.tar.gz" "TokenBoard-v$VERSION-macos.app.tar.gz"
+          mv "Token 看板.app.tar.gz.sig" "TokenBoard-v$VERSION-macos.app.tar.gz.sig"
+
+      # updater 静态清单，端点固定为 releases/latest/download/latest.json
+      - name: Generate latest.json
+        run: |
+          cd src-tauri/target/release/bundle/macos
+          SIG=$(cat "TokenBoard-v$VERSION-macos.app.tar.gz.sig")
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          URL="https://github.com/Drok1015/token-board/releases/download/v$VERSION/TokenBoard-v$VERSION-macos.app.tar.gz"
+          printf '{\n  "version": "%s",\n  "notes": "详见 Release 说明",\n  "pub_date": "%s",\n  "platforms": {\n    "darwin-aarch64": {\n      "signature": "%s",\n      "url": "%s"\n    }\n  }\n}\n' \
+            "$VERSION" "$PUB_DATE" "$SIG" "$URL" > latest.json
+          cat latest.json
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -102,7 +118,10 @@ jobs:
           target_commitish: ${{ env.BUMP_SHA }}
           generate_release_notes: true
           make_latest: true
-          files: src-tauri/target/release/bundle/macos/TokenBoard-v${{ env.VERSION }}-macos.zip
+          files: |
+            src-tauri/target/release/bundle/macos/TokenBoard-v${{ env.VERSION }}-macos.zip
+            src-tauri/target/release/bundle/macos/TokenBoard-v${{ env.VERSION }}-macos.app.tar.gz
+            src-tauri/target/release/bundle/macos/latest.json
 
       # 只保留最近 2 个 Release（gh release list 按创建时间倒序），更早的连同 tag 一起删除
       - name: Prune old releases

@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Menu, MenuItem } from '@tauri-apps/api/menu';
+import { check as checkUpdate } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 import {
   currentMonitor,
   getCurrentWindow,
@@ -407,7 +409,22 @@ export function mountBoard() {
     .then((value) => applySettings(value))
     .catch(console.error);
 
+  // 启动及每 6 小时检查一次 GitHub 最新 Release，有新版本则后台下载安装并重启
+  async function checkForUpdates() {
+    try {
+      const update = await checkUpdate();
+      if (!update) return;
+      updated.textContent = `更新 v${update.version} 中…`;
+      await update.downloadAndInstall();
+      await relaunch();
+    } catch (error) {
+      console.error('检查更新失败', error);
+    }
+  }
+
   refreshQuotas().catch(console.error);
   window.setInterval(() => { refreshQuotas().catch(console.error); }, 5 * 60 * 1000);
   window.setInterval(renderRefreshElapsed, 60 * 1000);
+  checkForUpdates().catch(console.error);
+  window.setInterval(() => { checkForUpdates().catch(console.error); }, 6 * 60 * 60 * 1000);
 }

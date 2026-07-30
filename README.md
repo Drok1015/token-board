@@ -77,14 +77,29 @@ npm run tauri build
 src-tauri/target/release/bundle/macos/Token 看板.app
 ```
 
-应用未签名或公证。首次打开被 macOS 阻止时，可在“系统设置 → 隐私与安全性”中选择允许打开。
+应用未签名或公证。首次打开被 macOS 阻止时，可在“系统设置 → 隐私与安全性”中选择允许打开，或解压后执行 `xattr -dr com.apple.quarantine "/Applications/Token 看板.app"` 直接放行。
+
+## 自动更新
+
+从 v0.2.10 起内置自动更新：应用启动时及每 6 小时检查一次 GitHub 最新 Release 的 `latest.json`，发现新版本会在后台下载并安装，完成后自动重启看板。更新包使用 minisign 签名（公钥内置在 `tauri.conf.json`），CI 发布时用仓库 secret `TAURI_SIGNING_PRIVATE_KEY` 签名。
+
+本地打包如需生成更新产物，先导出私钥：
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY=$(cat ~/.tauri/token-board.key)
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+npm run tauri build
+```
+
+私钥文件位于 `~/.tauri/token-board.key`（未纳入 Git）；丢失私钥将无法再签发可被旧版本接受的更新包。
 
 ## 发布新版本
 
 发布已全自动（`.github/workflows/release.yml`）：提交代码改动并 push 到 `main` 即可，无需手动改版本号、无需本地钩子。
 
 - CI 每次在 main 检测到新提交时，自动把最新 tag 的 patch 版本 +1，由机器人提交 `chore: bump version` 回写 main（同步 `package.json`、`package-lock.json`、`tauri.conf.json`、`Cargo.toml`、`Cargo.lock`）。
-- 随后自动完成 macOS 构建、ad-hoc 签名、压缩，并创建 tag 与 Release（`TokenBoard-v<版本>-macos.zip`，标记为 Latest）。
+- 随后自动完成 macOS 构建、ad-hoc 签名、压缩，并创建 tag 与 Release（`TokenBoard-v<版本>-macos.zip`、updater 更新包 `TokenBoard-v<版本>-macos.app.tar.gz` 及清单 `latest.json`，标记为 Latest）。
+- 发版后自动清理旧 Release：只保留最近 2 个，更早的连同 tag 一起删除。
 - 机器人提交不会再次触发发布，不会循环；提交信息中包含 `[skip release]` 可跳过本次自动发布。
 
 ## 说明
