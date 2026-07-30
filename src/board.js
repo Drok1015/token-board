@@ -11,11 +11,17 @@ import {
 const COMPACT_BOARD_WIDTH = 240;
 const EXPANDED_BOARD_WIDTH = 300;
 const BOARD_HEIGHT = 175;
+const ROW_HEIGHT = 25;
 const EDGE_TAB_WIDTH = 24;
 const EDGE_TAB_HEIGHT = 72;
 const SNAP_DISTANCE = 16;
 const FADE_DURATION = 100;
-const DEFAULT_SETTINGS = { autoHide: false, hideDelaySeconds: 10, showPlans: true };
+const DEFAULT_SETTINGS = {
+  autoHide: false,
+  hideDelaySeconds: 10,
+  showPlans: true,
+  visibleProviders: ['CODEX', 'KIMI', 'GLM', 'DEEPSEEK'],
+};
 
 export function mountBoard() {
   const app = document.querySelector('#app');
@@ -26,10 +32,10 @@ export function mountBoard() {
       <section class="board" aria-label="Token 看板" data-tauri-drag-region>
         <div class="screen" aria-live="polite" data-tauri-drag-region>
           <div class="screen-title">TOKEN 看板 <span class="signal">●</span><span class="updated" id="updated">自动刷新</span></div>
-          <div class="quota-row"><b>CODEX</b><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span></div>
-          <div class="quota-row"><b>KIMI</b><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span></div>
-          <div class="quota-row"><b>GLM</b><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span></div>
-          <div class="quota-row"><b>DEEPSEEK</b><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span></div>
+          <div class="quota-row" data-provider="CODEX"><b>CODEX</b><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span></div>
+          <div class="quota-row" data-provider="KIMI"><b>KIMI</b><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span></div>
+          <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span></div>
+          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span></div>
           <div class="screen-footer">5分钟刷新一次，可右键手动刷新</div>
         </div>
       </section>
@@ -65,12 +71,22 @@ export function mountBoard() {
     return settings.showPlans ? EXPANDED_BOARD_WIDTH : COMPACT_BOARD_WIDTH;
   }
 
+  function visibleProviders() {
+    const list = (settings.visibleProviders || []).filter((name) => name in ids);
+    return list.length > 0 ? list : DEFAULT_SETTINGS.visibleProviders;
+  }
+
+  function currentBoardHeight() {
+    return BOARD_HEIGHT - (DEFAULT_SETTINGS.visibleProviders.length - visibleProviders().length) * ROW_HEIGHT;
+  }
+
   async function resizeBoardForSettings() {
     if (edgeState || transitioning) return;
     const width = currentBoardWidth();
+    const height = currentBoardHeight();
     const monitor = await currentMonitor();
     if (!monitor) {
-      await appWindow.setSize(new LogicalSize(width, BOARD_HEIGHT));
+      await appWindow.setSize(new LogicalSize(width, height));
       return;
     }
 
@@ -79,13 +95,13 @@ export function mountBoard() {
     const workSize = monitor.workArea.size.toLogical(scale);
     const position = (await appWindow.outerPosition()).toLogical(scale);
     const size = (await appWindow.outerSize()).toLogical(scale);
-    if (Math.abs(size.width - width) < 1) return;
+    if (Math.abs(size.width - width) < 1 && Math.abs(size.height - height) < 1) return;
 
     const leftDistance = Math.abs(position.x - workPosition.x);
     const rightDistance = Math.abs(workPosition.x + workSize.width - (position.x + size.width));
     transitioning = true;
     try {
-      await appWindow.setSize(new LogicalSize(width, BOARD_HEIGHT));
+      await appWindow.setSize(new LogicalSize(width, height));
       if (rightDistance < leftDistance) {
         const x = clamp(
           position.x + size.width - width,
@@ -102,6 +118,10 @@ export function mountBoard() {
   async function applySettings(value) {
     settings = { ...DEFAULT_SETTINGS, ...value };
     shell.classList.toggle('plans-hidden', !settings.showPlans);
+    const visible = visibleProviders();
+    document.querySelectorAll('.quota-row[data-provider]').forEach((row) => {
+      row.classList.toggle('provider-hidden', !visible.includes(row.dataset.provider));
+    });
     await resizeBoardForSettings();
     scheduleAutoHide();
   }
@@ -232,14 +252,15 @@ export function mountBoard() {
     try {
       await wait(FADE_DURATION);
       const width = currentBoardWidth();
-      await appWindow.setSize(new LogicalSize(width, BOARD_HEIGHT));
+      const height = currentBoardHeight();
+      await appWindow.setSize(new LogicalSize(width, height));
       const x = side === 'left'
         ? workPosition.x + SNAP_DISTANCE + 10
         : workPosition.x + workSize.width - width - SNAP_DISTANCE - 10;
       const y = clamp(
-        tabY - (BOARD_HEIGHT - EDGE_TAB_HEIGHT) / 2,
+        tabY - (height - EDGE_TAB_HEIGHT) / 2,
         workPosition.y,
-        workPosition.y + workSize.height - BOARD_HEIGHT,
+        workPosition.y + workSize.height - height,
       );
       await appWindow.setPosition(new LogicalPosition(x, y));
       shell.classList.remove('edge-hidden', `edge-${side}`);
@@ -274,6 +295,17 @@ export function mountBoard() {
     updated.textContent = minutes === 0 ? '刚刚刷新' : `${minutes}分钟前更新`;
   }
 
+  // 按窗口剩余额度着色：<=60% 橙色，<=30% 红色；非百分比内容（余额、状态文案）原样展示
+  function renderQuotaValue(node, value) {
+    node.innerHTML = value.split(' / ').map((part) => {
+      const match = part.match(/(\d+)%/);
+      if (!match) return part;
+      const pct = Number(match[1]);
+      const cls = pct <= 30 ? 'pct-red' : pct <= 60 ? 'pct-orange' : '';
+      return cls ? `<span class="${cls}">${part}</span>` : part;
+    }).join(' / ');
+  }
+
   async function refreshQuotas() {
     if (refreshInProgress) return;
     refreshInProgress = true;
@@ -282,7 +314,7 @@ export function mountBoard() {
       const lines = await invoke('get_quotas');
       lines.forEach(({ provider, value, plan }) => {
         const node = document.querySelector(`#${ids[provider]}`);
-        if (node) node.textContent = value;
+        if (node) renderQuotaValue(node, value);
         const planNode = document.querySelector(`#${planIds[provider]}`);
         if (planNode) planNode.textContent = plan || '';
       });

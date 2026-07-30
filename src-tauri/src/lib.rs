@@ -18,6 +18,8 @@ struct QuotaLine {
     plan: Option<String>,
 }
 
+const ALL_PROVIDERS: [&str; 4] = ["CODEX", "KIMI", "GLM", "DEEPSEEK"];
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(default)]
@@ -25,6 +27,9 @@ struct BoardSettings {
     auto_hide: bool,
     hide_delay_seconds: u64,
     show_plans: bool,
+    visible_providers: Vec<String>,
+    glm_api_key: String,
+    deepseek_api_key: String,
 }
 
 impl Default for BoardSettings {
@@ -33,6 +38,9 @@ impl Default for BoardSettings {
             auto_hide: false,
             hide_delay_seconds: 10,
             show_plans: true,
+            visible_providers: ALL_PROVIDERS.map(str::to_owned).to_vec(),
+            glm_api_key: String::new(),
+            deepseek_api_key: String::new(),
         }
     }
 }
@@ -40,6 +48,9 @@ impl Default for BoardSettings {
 impl BoardSettings {
     fn normalized(mut self) -> Self {
         self.hide_delay_seconds = self.hide_delay_seconds.clamp(1, 3_600);
+        self.visible_providers.retain(|name| ALL_PROVIDERS.contains(&name.as_str()));
+        self.glm_api_key = self.glm_api_key.trim().to_owned();
+        self.deepseek_api_key = self.deepseek_api_key.trim().to_owned();
         self
     }
 }
@@ -107,8 +118,13 @@ fn kimi_membership_name(level: &str) -> String {
     }
 }
 
-async fn glm_line(client: &reqwest::Client) -> QuotaLine {
-    let Some(key) = provider_key("Zhipu GLM") else {
+// 优先使用设置页填写的 key，留空则回退到 cc-switch
+fn provider_key_with_override(name: &str, override_key: &str) -> Option<String> {
+    if override_key.is_empty() { provider_key(name) } else { Some(override_key.to_owned()) }
+}
+
+async fn glm_line(client: &reqwest::Client, override_key: &str) -> QuotaLine {
+    let Some(key) = provider_key_with_override("Zhipu GLM", override_key) else {
         return QuotaLine { provider: "GLM", value: "未配置".into(), plan: None };
     };
     let response = match client.get("https://open.bigmodel.cn/api/monitor/usage/quota/limit")
@@ -234,8 +250,8 @@ async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
     QuotaLine { provider: "KIMI", value, plan }
 }
 
-async fn deepseek_line(client: &reqwest::Client) -> QuotaLine {
-    let Some(key) = provider_key("DeepSeek") else {
+async fn deepseek_line(client: &reqwest::Client, override_key: &str) -> QuotaLine {
+    let Some(key) = provider_key_with_override("DeepSeek", override_key) else {
         return QuotaLine { provider: "DEEPSEEK", value: "未配置".into(), plan: None };
     };
     let response = match client.get("https://api.deepseek.com/user/balance")
@@ -326,13 +342,22 @@ fn codex_line() -> QuotaLine {
 }
 
 #[tauri::command]
-async fn get_quotas() -> Vec<QuotaLine> {
+async fn get_quotas(app: tauri::AppHandle) -> Vec<QuotaLine> {
+    let settings = read_settings(&app);
+    let visible = |name: &str| settings.visible_providers.iter().any(|p| p == name);
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build();
     let Ok(client) = client else { return vec![] };
-    let codex = tauri::async_runtime::spawn_blocking(codex_line);
-    let mut quotas = vec![kimi_line(&client).await, glm_line(&client).await, deepseek_line(&client).await];
-    let codex = codex.await.unwrap_or(QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None });
-    quotas.insert(0, codex);
+    let codex = visible("CODEX").then(|| tauri::async_runtime::spawn_blocking(codex_line));
+    let kimi = visible("KIMI").then(|| kimi_line(&client));
+    let glm = visible("GLM").then(|| glm_line(&client, &settings.glm_api_key));
+    let deepseek = visible("DEEPSEEK").then(|| deepseek_line(&client, &settings.deepseek_api_key));
+    let mut quotas = vec![];
+    if let Some(task) = codex {
+        quotas.push(task.await.unwrap_or(QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None }));
+    }
+    if let Some(future) = kimi { quotas.push(future.await); }
+    if let Some(future) = glm { quotas.push(future.await); }
+    if let Some(future) = deepseek { quotas.push(future.await); }
     quotas
 }
 
@@ -389,7 +414,7 @@ async fn open_settings(app: tauri::AppHandle) -> Result<(), String> {
         tauri::WebviewUrl::App("index.html?view=settings".into()),
     )
     .title("设置")
-    .inner_size(410.0, 320.0)
+    .inner_size(410.0, 560.0)
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
@@ -495,6 +520,23 @@ mod tests {
         assert!(settings.auto_hide);
         assert_eq!(settings.hide_delay_seconds, 23);
         assert!(settings.show_plans);
+        assert_eq!(settings.visible_providers, ALL_PROVIDERS.map(str::to_owned).to_vec());
+        assert!(settings.glm_api_key.is_empty());
+        assert!(settings.deepseek_api_key.is_empty());
+    }
+
+    #[test]
+    fn normalized_settings_drop_unknown_providers_and_trim_api_keys() {
+        let settings = BoardSettings {
+            visible_providers: vec!["GLM".into(), "UNKNOWN".into(), "KIMI".into()],
+            glm_api_key: "  sk-glm  ".into(),
+            deepseek_api_key: " sk-deepseek ".into(),
+            ..BoardSettings::default()
+        }
+        .normalized();
+        assert_eq!(settings.visible_providers, ["GLM", "KIMI"]);
+        assert_eq!(settings.glm_api_key, "sk-glm");
+        assert_eq!(settings.deepseek_api_key, "sk-deepseek");
     }
 
     #[test]

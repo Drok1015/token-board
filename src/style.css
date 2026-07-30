@@ -12,6 +12,9 @@ body { margin: 0; overflow: hidden; background: transparent; user-select: none; 
 .screen-footer { padding-top: 4px; color: #75af89; font-size: 8px; line-height: 14px; text-align: center; }
 .plans-hidden .screen { width: 220px; }
 .plans-hidden .plan-badge { display: none; }
+.quota-row.provider-hidden { display: none; }
+.pct-orange { color: #ffb020; font-weight: 700; }
+.pct-red { color: #ff5c5c; font-weight: 700; }
 .edge-tab { display: none; width: 100%; height: 100%; border: 1px solid #6aa982; color: #b7ffd2; background: linear-gradient(135deg, #173d2a, #07180f); box-shadow: 0 5px 12px rgb(4 18 14 / 45%); font: 700 22px/1 -apple-system, BlinkMacSystemFont, sans-serif; cursor: pointer; }.edge-hidden .board { display: none; }.edge-hidden .edge-tab { display: grid; place-items: center; }.edge-hidden.edge-left .edge-tab { border-radius: 0 10px 10px 0; border-left: 0; }.edge-hidden.edge-right .edge-tab { border-radius: 10px 0 0 10px; border-right: 0; }.edge-tab:hover { color: #fff; background: linear-gradient(135deg, #205639, #0b2618); }
 @keyframes blink { 50% { opacity: .35; } }
 
@@ -27,7 +30,7 @@ body.settings-mode {
 .settings-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 11px; color: #fff; background: linear-gradient(145deg, #36a266, #177644); box-shadow: inset 0 0 0 1px rgb(0 0 0 / 12%), 0 2px 7px rgb(0 0 0 / 16%); font-size: 25px; }
 .settings-header h1 { margin: 0 0 3px; font-size: 17px; font-weight: 650; letter-spacing: -.2px; }
 .settings-header p { margin: 0; color: #73747a; font-size: 12px; }
-#settings-form { flex-shrink: 0; overflow: hidden; border: 1px solid #d3d3d7; border-radius: 10px; background: rgb(255 255 255 / 78%); box-shadow: 0 1px 2px rgb(0 0 0 / 5%); }
+#settings-form { flex-shrink: 1; overflow-y: auto; border: 1px solid #d3d3d7; border-radius: 10px; background: rgb(255 255 255 / 78%); box-shadow: 0 1px 2px rgb(0 0 0 / 5%); }
 .setting-row { display: flex; align-items: center; justify-content: space-between; min-height: 57px; padding: 10px 13px; }
 .setting-row + .setting-row { border-top: 1px solid #dedee2; }
 .setting-row > span:first-child { display: grid; gap: 3px; }
@@ -38,6 +41,12 @@ body.settings-mode {
 .seconds-input input { width: 70px; height: 28px; padding: 3px 7px; border: 1px solid #bcbcc2; border-radius: 6px; color: #222; background: #fff; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; text-align: right; outline: none; }
 .seconds-input input:focus { border-color: #258c52; box-shadow: 0 0 0 3px rgb(37 140 82 / 16%); }
 .seconds-input input:disabled { color: #9a9a9f; background: #ededf0; }
+.setting-providers-header { min-height: 46px; padding-bottom: 6px; }
+.provider-row { min-height: 42px; padding-top: 6px; padding-bottom: 6px; }
+.apikey-row { display: none; min-height: 42px; padding: 6px 13px 6px 26px; background: rgb(0 0 0 / 2%); }
+.apikey-row.visible { display: flex; }
+.apikey-row input { width: 150px; height: 26px; padding: 3px 7px; border: 1px solid #bcbcc2; border-radius: 6px; color: #222; background: #fff; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; outline: none; }
+.apikey-row input:focus { border-color: #258c52; box-shadow: 0 0 0 3px rgb(37 140 82 / 16%); }
 .settings-actions { display: flex; flex-shrink: 0; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .settings-message { flex: 1; color: #b23434; font-size: 11px; }
 .settings-actions button { min-width: 68px; height: 29px; padding: 0 13px; border-radius: 7px; font: 12px -apple-system, BlinkMacSystemFont, sans-serif; cursor: pointer; }

@@ -1,6 +1,20 @@
 import { invoke } from '@tauri-apps/api/core';
 
-const DEFAULT_SETTINGS = { autoHide: false, hideDelaySeconds: 10, showPlans: true };
+const DEFAULT_SETTINGS = {
+  autoHide: false,
+  hideDelaySeconds: 10,
+  showPlans: true,
+  visibleProviders: ['CODEX', 'KIMI', 'GLM', 'DEEPSEEK'],
+  glmApiKey: '',
+  deepseekApiKey: '',
+};
+
+const PROVIDERS = [
+  { name: 'CODEX', label: 'CODEX', hint: '读取本机 codex 登录状态' },
+  { name: 'KIMI', label: 'KIMI', hint: '读取本机 Kimi Code 凭据' },
+  { name: 'GLM', label: 'GLM', hint: '默认从 cc-switch 读取', keyField: 'glmApiKey', keyId: 'glm-api-key' },
+  { name: 'DEEPSEEK', label: 'DeepSeek', hint: '默认从 cc-switch 读取', keyField: 'deepseekApiKey', keyId: 'deepseek-api-key' },
+];
 
 export function mountSettings() {
   document.body.classList.add('settings-mode');
@@ -40,6 +54,13 @@ export function mountSettings() {
           </span>
           <input id="show-plans" type="checkbox">
         </label>
+        <div class="setting-row setting-providers-header">
+          <span>
+            <strong>显示的供应商</strong>
+            <small>勾选后展示在看板中，至少保留一个</small>
+          </span>
+        </div>
+        <div id="provider-list"></div>
       </form>
       <footer class="settings-actions">
         <span class="settings-message" id="settings-message" role="status"></span>
@@ -54,6 +75,46 @@ export function mountSettings() {
   const showPlans = document.querySelector('#show-plans');
   const message = document.querySelector('#settings-message');
   const saveButton = document.querySelector('[type="submit"][form="settings-form"]');
+
+  // 每个供应商一行；GLM / DeepSeek 勾选时在下方展开 API key 输入框（留空则从 cc-switch 读取）
+  const providerList = document.querySelector('#provider-list');
+  const providerRows = PROVIDERS.map((provider) => {
+    const row = document.createElement('label');
+    row.className = 'setting-row setting-toggle provider-row';
+    row.innerHTML = `
+      <span>
+        <strong>${provider.label}</strong>
+        <small>${provider.hint}</small>
+      </span>
+      <input type="checkbox" data-provider="${provider.name}">`;
+    providerList.appendChild(row);
+    const checkbox = row.querySelector('input');
+
+    let keyInput = null;
+    let keyRow = null;
+    if (provider.keyField) {
+      keyRow = document.createElement('div');
+      keyRow.className = 'setting-row apikey-row';
+      keyRow.innerHTML = `
+        <span>
+          <strong>${provider.label} API Key</strong>
+          <small>留空则从 cc-switch 读取</small>
+        </span>
+        <input id="${provider.keyId}" type="password" autocomplete="off" spellcheck="false">`;
+      providerList.appendChild(keyRow);
+      keyInput = keyRow.querySelector('input');
+      checkbox.addEventListener('change', () => {
+        keyRow.classList.toggle('visible', checkbox.checked);
+      });
+    }
+    return { provider, checkbox, keyRow, keyInput };
+  });
+
+  function syncProviderRows() {
+    providerRows.forEach(({ checkbox, keyRow }) => {
+      if (keyRow) keyRow.classList.toggle('visible', checkbox.checked);
+    });
+  }
 
   function syncDelayState() {
     hideDelay.disabled = !autoHide.checked;
@@ -73,6 +134,14 @@ export function mountSettings() {
       return;
     }
 
+    const visibleProviders = providerRows
+      .filter(({ checkbox }) => checkbox.checked)
+      .map(({ provider }) => provider.name);
+    if (visibleProviders.length === 0) {
+      message.textContent = '至少选择一个供应商';
+      return;
+    }
+
     saveButton.disabled = true;
     message.textContent = '正在保存…';
     try {
@@ -81,6 +150,9 @@ export function mountSettings() {
           autoHide: autoHide.checked,
           hideDelaySeconds: seconds,
           showPlans: showPlans.checked,
+          visibleProviders,
+          glmApiKey: providerRows.find(({ provider }) => provider.keyField === 'glmApiKey').keyInput.value.trim(),
+          deepseekApiKey: providerRows.find(({ provider }) => provider.keyField === 'deepseekApiKey').keyInput.value.trim(),
         },
       });
     } catch (error) {
@@ -96,7 +168,15 @@ export function mountSettings() {
       autoHide.checked = Boolean(settings.autoHide);
       hideDelay.value = String(settings.hideDelaySeconds);
       showPlans.checked = Boolean(settings.showPlans);
+      const visible = Array.isArray(settings.visibleProviders) && settings.visibleProviders.length > 0
+        ? settings.visibleProviders
+        : DEFAULT_SETTINGS.visibleProviders;
+      providerRows.forEach(({ provider, checkbox, keyInput }) => {
+        checkbox.checked = visible.includes(provider.name);
+        if (keyInput) keyInput.value = settings[provider.keyField] || '';
+      });
       syncDelayState();
+      syncProviderRows();
     })
     .catch((error) => {
       console.error(error);

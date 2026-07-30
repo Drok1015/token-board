@@ -15,6 +15,7 @@
 - 拖到左侧或右侧屏幕边缘时自动收起，仅保留贴边箭头标签；标签只可上下移动，点击恢复看板
 - 右键菜单提供“刷新 / 设置 / 关闭”
 - 可在设置中开启自动隐藏并调整展示秒数（默认 10 秒），也可以关闭订阅套餐标签；关闭套餐标签时看板恢复紧凑宽度，每次点击边缘箭头展开时都会重新计时
+- 可在设置中勾选要展示的供应商（至少保留一个），隐藏后看板高度自动收缩；GLM 和 DeepSeek 勾选后可直接在设置页填写 API Key，优先于 cc-switch 中的配置
 
 CODEX 行由本机已登录的 ChatGPT/Codex 获取。当前账号若只返回一个额度周期，就只显示该周期；若同时返回多个周期，看板会自动展示，例如 `5h 80% / 7d 60%`。
 
@@ -42,14 +43,16 @@ CODEX 额度不是手动粘贴 OpenAI API Key 获取的，而是来自 ChatGPT/C
 ### GLM（智谱）
 
 1. 在 [智谱开放平台的 API Key 页面](https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys) 创建 API Key。
-2. 在 cc-switch 的 **Codex** 供应商配置中新增或编辑名称为 `Zhipu GLM` 的供应商，并填入 Key。
-3. cc-switch 将配置保存在 `~/.cc-switch/cc-switch.db` 的 `providers` 表中；本项目读取 `settings_config.auth.OPENAI_API_KEY`。请通过 cc-switch 修改，不要直接编辑 SQLite 数据库。
+2. 在看板设置页勾选 GLM 后，可直接在下方的 API Key 输入框中填入 Key（优先使用）。
+3. 设置页留空时回退到 cc-switch：在 cc-switch 的 **Codex** 供应商配置中新增或编辑名称为 `Zhipu GLM` 的供应商，并填入 Key。
+4. cc-switch 将配置保存在 `~/.cc-switch/cc-switch.db` 的 `providers` 表中；本项目读取 `settings_config.auth.OPENAI_API_KEY`。请通过 cc-switch 修改，不要直接编辑 SQLite 数据库。
 
 ### DeepSeek
 
 1. 在 [DeepSeek Platform API Keys](https://platform.deepseek.com/api_keys) 创建 API Key。
-2. 在 cc-switch 的 **Codex** 供应商配置中新增或编辑名称为 `DeepSeek` 的供应商，并填入 Key。
-3. 位置同样是 `~/.cc-switch/cc-switch.db` 的 `providers` 表及 `settings_config.auth.OPENAI_API_KEY` 字段；请通过 cc-switch 管理。
+2. 在看板设置页勾选 DeepSeek 后，可直接在下方的 API Key 输入框中填入 Key（优先使用）。
+3. 设置页留空时回退到 cc-switch：在 cc-switch 的 **Codex** 供应商配置中新增或编辑名称为 `DeepSeek` 的供应商，并填入 Key。
+4. 位置同样是 `~/.cc-switch/cc-switch.db` 的 `providers` 表及 `settings_config.auth.OPENAI_API_KEY` 字段；请通过 cc-switch 管理。
 
 未配置、未登录或凭据失效的服务会在看板中明确显示状态，不会回显密钥。
 
