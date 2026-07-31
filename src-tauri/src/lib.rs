@@ -558,24 +558,48 @@ fn fill_rounded_mask(rgba: &mut [u8], width: u32, height: u32, alpha: u8) {
     }
 }
 
-fn tray_font() -> Option<&'static fontdue::Font> {
-    static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
-    FONT.get_or_init(|| {
+struct TrayFonts {
+    primary: fontdue::Font,
+    fallback: Option<fontdue::Font>,
+}
+
+impl TrayFonts {
+    // Helvetica 不含中文字形，「读取失败/未配置」等状态要回退到 CJK 字体，否则任务栏显示方块
+    fn for_char(&self, ch: char) -> &fontdue::Font {
+        if self.primary.lookup_glyph_index(ch) != 0 {
+            return &self.primary;
+        }
+        match &self.fallback {
+            Some(fallback) if fallback.lookup_glyph_index(ch) != 0 => fallback,
+            _ => &self.primary,
+        }
+    }
+}
+
+fn tray_fonts() -> Option<&'static TrayFonts> {
+    static FONTS: OnceLock<Option<TrayFonts>> = OnceLock::new();
+    FONTS.get_or_init(|| {
         let data = fs::read("/System/Library/Fonts/Helvetica.ttc").ok()?;
         // Helvetica.ttc 合集中 index 1 为 Bold 字重
-        fontdue::Font::from_bytes(data, fontdue::FontSettings { collection_index: 1, ..Default::default() }).ok()
+        let primary = fontdue::Font::from_bytes(data, fontdue::FontSettings { collection_index: 1, ..Default::default() }).ok()?;
+        let fallback = ["/System/Library/Fonts/Hiragino Sans GB.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"]
+            .iter()
+            .find_map(|path| {
+                fs::read(path).ok().and_then(|data| fontdue::Font::from_bytes(data, Default::default()).ok())
+            });
+        Some(TrayFonts { primary, fallback })
     })
     .as_ref()
 }
 
 // 托盘标题不支持富文本，把彩色文字渲染成 RGBA 图片设为托盘图标（文字即图标）
 fn render_tray_icon(segments: &[(String, TrayColor, f32)]) -> Option<tauri::image::Image<'static>> {
-    let font = tray_font()?;
+    let fonts = tray_fonts()?;
     let mut glyphs = vec![];
     let mut pen_x = TRAY_PAD_X;
     for (text, color, px) in segments {
         for ch in text.chars() {
-            let (metrics, bitmap) = font.rasterize(ch, *px);
+            let (metrics, bitmap) = fonts.for_char(ch).rasterize(ch, *px);
             glyphs.push((metrics, bitmap, *color, pen_x.round() as i32));
             pen_x += metrics.advance_width;
         }
@@ -911,6 +935,19 @@ mod tests {
                 ("读取失败".to_owned(), TrayColor::Red, TRAY_FONT_PX)
             ]
         );
+    }
+
+    #[test]
+    fn tray_fonts_fall_back_to_cjk_for_chinese_status_text() {
+        let fonts = tray_fonts().expect("system fonts should load");
+        let fallback = fonts.fallback.as_ref().expect("a CJK fallback font should load");
+        for ch in "读取失败未配置登录".chars() {
+            assert!(std::ptr::eq(fonts.for_char(ch), fallback), "「{ch}」应由 CJK 回退字体渲染");
+        }
+        assert!(std::ptr::eq(fonts.for_char('A'), &fonts.primary));
+        // 渲染整条「读取失败」不应 panic 且所有汉字都有真实字形
+        let segments = tray_segments("CODEX", "读取失败");
+        assert!(render_tray_icon(&segments).is_some());
     }
 
     #[test]
