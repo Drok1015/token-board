@@ -149,7 +149,7 @@ export function mountBoard() {
     scheduleAutoUpdate();
   }
 
-  // 自动更新默认关闭：开启后立即检查一次并每 6 小时轮询；关闭时清除轮询（右键菜单手动检查不受影响）
+  // 自动更新默认关闭：开启后立即检查一次并每 2 小时轮询；关闭时清除轮询（右键菜单手动检查不受影响）
   function scheduleAutoUpdate() {
     if (updateTimer !== null) {
       window.clearInterval(updateTimer);
@@ -157,7 +157,7 @@ export function mountBoard() {
     }
     if (!settings.autoUpdate) return;
     checkForUpdates().catch(console.error);
-    updateTimer = window.setInterval(() => { checkForUpdates().catch(console.error); }, 6 * 60 * 60 * 1000);
+    updateTimer = window.setInterval(() => { checkForUpdates().catch(console.error); }, 2 * 60 * 60 * 1000);
   }
 
   function scheduleAutoHide() {
@@ -469,18 +469,27 @@ export function mountBoard() {
   // 双保险：未开启自动更新时，非手动触发一律直接返回
   async function checkForUpdates(manual = false) {
     if (!manual && !settings.autoUpdate) return;
+    let update = null;
     try {
-      const update = await checkUpdate();
-      if (!update) {
-        if (manual) updated.textContent = '已是最新版本';
-        return;
-      }
+      update = await checkUpdate();
+    } catch (error) {
+      console.error('检查更新失败', error);
+      if (manual) updated.textContent = '检查更新失败';
+      return;
+    }
+    if (!update) {
+      if (manual) updated.textContent = '已是最新版本';
+      return;
+    }
+    // 下载安装失败（常见于安装包未解除 quarantine 权限限制）时弹窗引导用户手动处理
+    try {
       updated.textContent = `更新 v${update.version} 中…`;
       await update.downloadAndInstall();
       await relaunch();
     } catch (error) {
-      console.error('检查更新失败', error);
-      if (manual) updated.textContent = '检查更新失败';
+      console.error('安装更新失败', error);
+      updated.textContent = '更新失败';
+      invoke('notify_update_failed').catch(console.error);
     }
   }
 

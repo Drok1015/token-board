@@ -778,6 +778,23 @@ fn notify_codex_full() {
         .spawn();
 }
 
+// 更新安装失败时弹系统对话框，引导用户手动解除 quarantine；osascript 会等用户点击，后台运行不阻塞看板
+fn update_failed_script() -> String {
+    let lines = [
+        "更新失败,可能是因为安装包没有进行权限处理,请按以下步骤尝试:",
+        "1.关闭app并将Token 看板.app移入Applications中",
+        r#"2.终端执行xattr -dr com.apple.quarantine \"/Applications/Token 看板.app\",没有报错就是成功了"#,
+        "3.重新打开app会自动更新下载",
+    ];
+    let message = lines.join("\" & return & \"");
+    format!("display dialog \"{message}\" with title \"Token 看板\" buttons {{\"知道了\"}} default button \"知道了\"")
+}
+
+#[tauri::command]
+fn notify_update_failed() {
+    let _ = Command::new("osascript").args(["-e", &update_failed_script()]).spawn();
+}
+
 #[tauri::command]
 fn open_app(app: &str) -> Result<(), String> {
     let app_name = match app {
@@ -818,6 +835,7 @@ pub fn run() {
             close_settings,
             close_app,
             notify_codex_full,
+            notify_update_failed,
             update_tray
         ])
         .run(tauri::generate_context!())
@@ -938,6 +956,17 @@ mod tests {
                 ("读取失败".to_owned(), TrayColor::Red, TRAY_FONT_PX)
             ]
         );
+    }
+
+    #[test]
+    fn update_failed_script_is_valid_multiline_applescript_dialog() {
+        let script = update_failed_script();
+        assert!(script.starts_with("display dialog \""));
+        assert!(script.contains("\" & return & \""));
+        // 路径两侧的引号必须转义，否则 AppleScript 编译失败
+        assert!(script.contains(r#"com.apple.quarantine \"/Applications/Token 看板.app\""#));
+        assert!(script.contains("1.关闭app并将Token 看板.app移入Applications中"));
+        assert!(script.contains("3.重新打开app会自动更新下载"));
     }
 
     #[test]
