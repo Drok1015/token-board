@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { Menu, MenuItem } from '@tauri-apps/api/menu';
 import { check as checkUpdate } from '@tauri-apps/plugin-updater';
@@ -43,7 +44,7 @@ export function mountBoard() {
           <div class="quota-row" data-provider="KIMI"><b>KIMI</b><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span></div>
           <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span></div>
           <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span></div>
-          <div class="screen-footer">5分钟刷新一次，可右键手动刷新</div>
+          <div class="screen-footer"><span>5分钟刷新一次，可右键手动刷新</span><span class="version" id="version"></span></div>
         </div>
       </section>
       <button class="edge-tab" id="edge-tab" type="button" aria-label="展开 Token 看板" title="点击展开；上下拖动调整位置">›</button>
@@ -54,6 +55,9 @@ export function mountBoard() {
   const shell = document.querySelector('#app-shell');
   const edgeTab = document.querySelector('#edge-tab');
   const updated = document.querySelector('#updated');
+  getVersion().then((version) => {
+    document.querySelector('#version').textContent = `v${version}`;
+  }).catch(console.error);
   let edgeState = null;
   let transitioning = false;
   let edgePointer = null;

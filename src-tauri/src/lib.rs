@@ -649,11 +649,14 @@ fn tray_menu(app: &tauri::AppHandle, settings: &BoardSettings) -> tauri::Result<
             .build(app)?;
         builder = builder.item(&item);
     }
+    let version_item = MenuItemBuilder::with_id("tray-version", format!("v{}", app.package_info().version))
+        .enabled(false)
+        .build(app)?;
     let refresh_item = MenuItemBuilder::with_id("tray-refresh", "刷新").build(app)?;
     let settings_item = MenuItemBuilder::with_id("tray-settings", "设置").build(app)?;
     let update_item = MenuItemBuilder::with_id("tray-update", "检查更新").build(app)?;
     let quit_item = MenuItemBuilder::with_id("tray-quit", "退出").build(app)?;
-    builder.separator().items(&[&refresh_item, &settings_item, &update_item, &quit_item]).build()
+    builder.separator().items(&[&version_item, &refresh_item, &settings_item, &update_item, &quit_item]).build()
 }
 
 fn refresh_tray_title(app: &tauri::AppHandle) {
