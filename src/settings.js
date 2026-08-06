@@ -92,7 +92,7 @@ export function mountSettings() {
           <label class="setting-row setting-toggle">
             <span>
               <strong>CODEX 重置提醒</strong>
-              <small>7d 额度比上次查询回升时弹系统对话框</small>
+              <small>每 5 分钟查询 codex-resets.com，检测到新重置时弹系统对话框</small>
             </span>
             <input id="codex-alert" type="checkbox">
           </label>

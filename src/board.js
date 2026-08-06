@@ -19,8 +19,9 @@ const EDGE_TAB_WIDTH = 24;
 const EDGE_TAB_HEIGHT = 72;
 const SNAP_DISTANCE = 16;
 const FADE_DURATION = 100;
-const CODEX_RESET_JUMP_THRESHOLD = 5; // 7d 额度单次回升超过该点数才可能视为重置（吸收滑动窗口 ±1~4 的自然抖动）
-const CODEX_RESET_BASELINE_MAX = 95; // 上次额度需低于该值才提醒：接近满额时的跳变基本是噪声，95% 以上的重置也没有提醒价值
+// 官方重置追踪站的公开 API：返回 @thsottiaux 宣布的重置事件，按时间倒序，时间为 UTC
+const CODEX_RESETS_API = 'https://codex-resets.com/api/resets';
+const CODEX_RESETS_TIMEOUT = 15 * 1000;
 const DEFAULT_SETTINGS = {
   autoHide: false,
   hideDelaySeconds: 10,
@@ -66,7 +67,7 @@ export function mountBoard() {
   let autoHideTimer = null;
   let updateTimer = null;
   let refreshInProgress = false;
-  let codexLastPercent = null;
+  let codexLastResetAt = null; // 最近一次已知的重置事件时间（ISO 字符串），用于识别新重置
   let lastRefreshAt = null;
   let boardHeight = BOARD_HEIGHT; // 最近一次的实测窗口高度；贴边隐藏时 DOM 不可见，用缓存值
 
@@ -307,27 +308,35 @@ export function mountBoard() {
     scheduleAutoHide();
   }
 
-  // CODEX 只看 7d 额度窗口，同时满足两个条件视为重置并弹系统提醒：
-  // 1) 上次额度低于 95%（95% 以上的重置没有提醒价值，也顺手挡掉接近满额时的噪声跳变）
-  // 2) 当前值比上次查询单次回升 >= 5（小幅回升是滑动窗口释放旧用量的自然抖动，不提醒；
-  //    真正的重置回到 100%，基线 <95% 时跳变必然 >= 6，不会漏报）
-  // 提醒后更新基线，同一水平不会重复提醒。读取失败时不更新基线；可在设置中关闭，
-  // 关闭期间不跟踪基线，重新开启后从下一次查询重新建立基线
-  async function maybeAlertCodexReset(lines) {
+  // CODEX 重置改为查询 codex-resets.com 的公开 API（追踪 @thsottiaux 官宣重置的推文），
+  // 随额度刷新每 5 分钟查询一次：取最新一条事件的 announced_at（UTC），比之前记录的更新
+  // 即视为发生新重置并弹系统提醒。首次查询静默建立基线（不为历史重置补弹提醒），同一事件
+  // 不会重复提醒。请求失败时保留基线等下个周期重试；可在设置中关闭，关闭期间不跟踪，
+  // 重新开启后从下一次查询重新建立基线
+  async function maybeAlertCodexReset() {
     if (!settings.codexAlert) {
-      codexLastPercent = null;
+      codexLastResetAt = null;
       return;
     }
-    const codex = lines.find((line) => line.provider === 'CODEX');
-    if (!codex) return;
-    const match = codex.value.match(/7d\s+(\d+)%/);
-    if (!match) return;
-    const pct = Number(match[1]);
-    const jumped = pct - (codexLastPercent ?? pct) >= CODEX_RESET_JUMP_THRESHOLD;
-    if (codexLastPercent !== null && codexLastPercent < CODEX_RESET_BASELINE_MAX && jumped) {
-      await invoke('notify_codex_full');
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), CODEX_RESETS_TIMEOUT);
+      const response = await fetch(CODEX_RESETS_API, {
+        headers: { accept: 'application/json' },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!response.ok) return;
+      const latest = (await response.json()).events?.[0]?.announced_at;
+      if (!latest) return;
+      // ISO 时间戳可直接按字符串比较先后
+      if (codexLastResetAt !== null && latest > codexLastResetAt) {
+        await invoke('notify_codex_full');
+      }
+      codexLastResetAt = latest;
+    } catch (error) {
+      console.error('查询 CODEX 重置状态失败', error);
     }
-    codexLastPercent = pct;
   }
 
   // 刷新成功后按「刚刚刷新 / N分钟前更新」展示，每分钟更新一次
@@ -362,7 +371,7 @@ export function mountBoard() {
       });
       lastRefreshAt = Date.now();
       renderRefreshElapsed();
-      await maybeAlertCodexReset(lines);
+      await maybeAlertCodexReset();
       invoke('update_tray', { lines }).catch(console.error);
     } catch (error) {
       console.error(error);
