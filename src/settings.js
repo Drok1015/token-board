@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
   codexAlert: true,
   showBoard: true,
   showTray: true,
+  showResets: true,
 };
 
 const PROVIDERS = [
@@ -64,6 +65,13 @@ export function mountSettings() {
               <small>在供应商名称后显示 Plus、Allegretto 等套餐标签</small>
             </span>
             <input id="show-plans" type="checkbox">
+          </label>
+          <label class="setting-row setting-toggle">
+            <span>
+              <strong>显示重置时间图标</strong>
+              <small>在供应商名称后显示沙漏，悬浮查看 5h / 7d 额度重置时间（当前仅 CODEX 提供）</small>
+            </span>
+            <input id="show-resets" type="checkbox">
           </label>
           <div class="setting-group">
             <div class="setting-row setting-providers-header">
@@ -126,6 +134,7 @@ export function mountSettings() {
   const hideDelay = document.querySelector('#hide-delay');
   const codexAlert = document.querySelector('#codex-alert');
   const showPlans = document.querySelector('#show-plans');
+  const showResets = document.querySelector('#show-resets');
   const autoUpdate = document.querySelector('#auto-update');
   const showBoard = document.querySelector('#show-board');
   const showTray = document.querySelector('#show-tray');
@@ -228,6 +237,7 @@ export function mountSettings() {
           autoHide: autoHide.checked,
           hideDelaySeconds: seconds,
           showPlans: showPlans.checked,
+          showResets: showResets.checked,
           autoUpdate: autoUpdate.checked,
           codexAlert: codexAlert.checked,
           showBoard: showBoard.checked,
@@ -252,6 +262,7 @@ export function mountSettings() {
       autoHide.checked = Boolean(settings.autoHide);
       hideDelay.value = String(settings.hideDelaySeconds);
       showPlans.checked = Boolean(settings.showPlans);
+      showResets.checked = Boolean(settings.showResets);
       autoUpdate.checked = Boolean(settings.autoUpdate);
       codexAlert.checked = Boolean(settings.codexAlert);
       showBoard.checked = Boolean(settings.showBoard);

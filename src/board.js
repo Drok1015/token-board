@@ -30,6 +30,7 @@ const DEFAULT_SETTINGS = {
   autoUpdate: true,
   codexAlert: true,
   showBoard: true,
+  showResets: true,
 };
 
 export function mountBoard() {
@@ -41,10 +42,10 @@ export function mountBoard() {
       <section class="board" aria-label="Token 看板" data-tauri-drag-region>
         <div class="screen" aria-live="polite" data-tauri-drag-region>
           <div class="screen-title">TOKEN 看板 <span class="signal">●</span><span class="updated" id="updated">自动刷新</span></div>
-          <div class="quota-row" data-provider="CODEX"><b>CODEX</b><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span></div>
-          <div class="quota-row" data-provider="KIMI"><b>KIMI</b><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span></div>
-          <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span></div>
-          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span></div>
+          <div class="quota-row" data-provider="CODEX"><b>CODEX</b><span class="reset-badge" id="codex-reset" aria-label="额度重置时间">⏳</span><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span></div>
+          <div class="quota-row" data-provider="KIMI"><b>KIMI</b><span class="reset-badge" id="kimi-reset" aria-label="额度重置时间">⏳</span><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span></div>
+          <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="reset-badge" id="glm-reset" aria-label="额度重置时间">⏳</span><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span></div>
+          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="reset-badge" id="deepseek-reset" aria-label="额度重置时间">⏳</span><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span></div>
           <div class="screen-footer"><span>5分钟刷新一次，可右键手动刷新</span><span class="version" id="version"></span></div>
         </div>
       </section>
@@ -53,6 +54,7 @@ export function mountBoard() {
 
   const ids = { CODEX: 'codex', KIMI: 'kimi', GLM: 'glm', DEEPSEEK: 'deepseek' };
   const planIds = { CODEX: 'codex-plan', KIMI: 'kimi-plan', GLM: 'glm-plan', DEEPSEEK: 'deepseek-plan' };
+  const resetIds = { CODEX: 'codex-reset', KIMI: 'kimi-reset', GLM: 'glm-reset', DEEPSEEK: 'deepseek-reset' };
   const shell = document.querySelector('#app-shell');
   const edgeTab = document.querySelector('#edge-tab');
   const updated = document.querySelector('#updated');
@@ -69,6 +71,7 @@ export function mountBoard() {
   let refreshInProgress = false;
   let codexLastResetAt = null; // 最近一次已知的重置事件时间（ISO 字符串），用于识别新重置
   let lastRefreshAt = null;
+  let resetsByProvider = {}; // 各供应商最近一次刷新拿到的窗口重置时间，供沙漏图标悬浮展示
   let boardHeight = BOARD_HEIGHT; // 最近一次的实测窗口高度；贴边隐藏时 DOM 不可见，用缓存值
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -148,6 +151,7 @@ export function mountBoard() {
     await resizeBoardForSettings();
     scheduleAutoHide();
     scheduleAutoUpdate();
+    renderResetBadges();
   }
 
   // 自动更新默认关闭：开启后立即检查一次并每 2 小时轮询；关闭时清除轮询（右键菜单手动检查不受影响）
@@ -357,18 +361,48 @@ export function mountBoard() {
     }).join(' / ');
   }
 
+  // 沙漏图标：悬浮显示各额度窗口（如 CODEX 的 5h / 7d）的重置时间；
+  // 无重置数据或设置关闭时不显示。用原生 title 提示，不受悬浮窗自身尺寸裁剪
+  function formatResetTime(ms) {
+    const date = new Date(ms);
+    if (Number.isNaN(date.getTime())) return '未知';
+    const time = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+    return date.toDateString() === new Date().toDateString()
+      ? time
+      : `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
+  }
+
+  function renderResetBadges() {
+    Object.entries(resetIds).forEach(([provider, id]) => {
+      const node = document.querySelector(`#${id}`);
+      if (!node) return;
+      const resets = settings.showResets ? (resetsByProvider[provider] || []) : [];
+      if (resets.length === 0) {
+        node.classList.remove('visible');
+        node.removeAttribute('title');
+        return;
+      }
+      node.classList.add('visible');
+      node.title = resets
+        .map(({ label, resetsAtMs }) => `${label} 重置：${formatResetTime(resetsAtMs)}`)
+        .join('\n');
+    });
+  }
+
   async function refreshQuotas() {
     if (refreshInProgress) return;
     refreshInProgress = true;
     updated.textContent = '刷新中…';
     try {
       const lines = await invoke('get_quotas');
-      lines.forEach(({ provider, value, plan }) => {
+      lines.forEach(({ provider, value, plan, resets }) => {
         const node = document.querySelector(`#${ids[provider]}`);
         if (node) renderQuotaValue(node, value);
         const planNode = document.querySelector(`#${planIds[provider]}`);
         if (planNode) planNode.textContent = plan || '';
+        resetsByProvider[provider] = Array.isArray(resets) ? resets : [];
       });
+      renderResetBadges();
       lastRefreshAt = Date.now();
       renderRefreshElapsed();
       await maybeAlertCodexReset();

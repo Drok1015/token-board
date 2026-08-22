@@ -16,11 +16,21 @@ use tauri::{
 
 const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 
+// 额度窗口的重置时间，用于看板沙漏图标的悬浮提示（目前只有 CODEX 提供）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuotaReset {
+    label: String,
+    resets_at_ms: i64,
+}
+
 #[derive(Serialize)]
 struct QuotaLine {
     provider: &'static str,
     value: String,
     plan: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    resets: Vec<QuotaReset>,
 }
 
 const ALL_PROVIDERS: [&str; 4] = ["CODEX", "KIMI", "GLM", "DEEPSEEK"];
@@ -40,6 +50,7 @@ struct BoardSettings {
     codex_alert: bool,
     show_board: bool,
     show_tray: bool,
+    show_resets: bool,
 }
 
 impl Default for BoardSettings {
@@ -56,6 +67,7 @@ impl Default for BoardSettings {
             codex_alert: true,
             show_board: true,
             show_tray: true,
+            show_resets: true,
         }
     }
 }
@@ -147,14 +159,14 @@ fn provider_key_with_override(name: &str, override_key: &str) -> Option<String> 
 
 async fn glm_line(client: &reqwest::Client, override_key: &str) -> QuotaLine {
     let Some(key) = provider_key_with_override("Zhipu GLM", override_key) else {
-        return QuotaLine { provider: "GLM", value: "未配置".into(), plan: None };
+        return QuotaLine { provider: "GLM", value: "未配置".into(), plan: None, resets: Vec::new() };
     };
     let response = match client.get("https://open.bigmodel.cn/api/monitor/usage/quota/limit")
         .bearer_auth(key).send().await.and_then(|r| r.error_for_status()) {
         Ok(value) => value,
-        Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into(), plan: None },
+        Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into(), plan: None, resets: Vec::new() },
     };
-    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into(), plan: None } };
+    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "GLM", value: "读取失败".into(), plan: None, resets: Vec::new() } };
     let mut limits: Vec<&Value> = payload.pointer("/data/limits").and_then(Value::as_array).into_iter().flatten()
         .filter(|item| item["type"].as_str() == Some("TOKENS_LIMIT")).collect();
     // 按窗口时长排序：unit 3 = 小时（number 个）、unit 6 = 周（number 个）。
@@ -179,7 +191,7 @@ async fn glm_line(client: &reqwest::Client, override_key: &str) -> QuotaLine {
         _ => "暂无额度".into(),
     };
     let plan = payload.pointer("/data/level").and_then(Value::as_str).map(str::to_owned);
-    QuotaLine { provider: "GLM", value, plan }
+    QuotaLine { provider: "GLM", value, plan, resets: Vec::new() }
 }
 
 fn now_secs() -> f64 {
@@ -242,7 +254,7 @@ async fn kimi_payload_from_path(client: &reqwest::Client, path: &Path) -> Option
 
 async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
     let Some(paths) = kimi_credential_paths() else {
-        return QuotaLine { provider: "KIMI", value: "未登录".into(), plan: None };
+        return QuotaLine { provider: "KIMI", value: "未登录".into(), plan: None, resets: Vec::new() };
     };
     let mut payload = None;
     for path in paths {
@@ -252,7 +264,7 @@ async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
         }
     }
     let Some(payload) = payload else {
-        return QuotaLine { provider: "KIMI", value: "未登录".into(), plan: None };
+        return QuotaLine { provider: "KIMI", value: "未登录".into(), plan: None, resets: Vec::new() };
     };
     let mut rows: Vec<(String, String)> = vec![];
     if let Some(limits) = payload["limits"].as_array() {
@@ -284,38 +296,61 @@ async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
         _ => "暂无额度".into(),
     };
     let plan = payload.pointer("/user/membership/level").and_then(Value::as_str).map(kimi_membership_name);
-    QuotaLine { provider: "KIMI", value, plan }
+    QuotaLine { provider: "KIMI", value, plan, resets: Vec::new() }
 }
 
 async fn deepseek_line(client: &reqwest::Client, override_key: &str) -> QuotaLine {
     let Some(key) = provider_key_with_override("DeepSeek", override_key) else {
-        return QuotaLine { provider: "DEEPSEEK", value: "未配置".into(), plan: None };
+        return QuotaLine { provider: "DEEPSEEK", value: "未配置".into(), plan: None, resets: Vec::new() };
     };
     let response = match client.get("https://api.deepseek.com/user/balance")
         .bearer_auth(key).send().await.and_then(|r| r.error_for_status()) {
         Ok(value) => value,
-        Err(_) => return QuotaLine { provider: "DEEPSEEK", value: "读取失败".into(), plan: None },
+        Err(_) => return QuotaLine { provider: "DEEPSEEK", value: "读取失败".into(), plan: None, resets: Vec::new() },
     };
-    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "DEEPSEEK", value: "读取失败".into(), plan: None } };
+    let payload: Value = match response.json().await { Ok(value) => value, Err(_) => return QuotaLine { provider: "DEEPSEEK", value: "读取失败".into(), plan: None, resets: Vec::new() } };
     let balance = payload["balance_infos"].as_array().and_then(|items| items.first())
         .and_then(|item| item["total_balance"].as_str()).unwrap_or("—");
-    QuotaLine { provider: "DEEPSEEK", value: format!("余额 ¥{balance}"), plan: Some("Token".into()) }
+    QuotaLine { provider: "DEEPSEEK", value: format!("余额 ¥{balance}"), plan: Some("Token".into()), resets: Vec::new() }
 }
 
-fn codex_window(window: &Value) -> Option<(i64, String)> {
-    let minutes = number(window.get("windowDurationMins"))?;
-    let used = number(window.get("usedPercent")).unwrap_or(100).clamp(0, 100);
-    let label = if minutes % 1_440 == 0 {
+fn window_label(minutes: i64) -> String {
+    if minutes % 1_440 == 0 {
         format!("{}d", minutes / 1_440)
     } else if minutes % 60 == 0 {
         format!("{}h", minutes / 60)
     } else {
         format!("{minutes}m")
-    };
-    Some((minutes, format!("{label} {}%", 100 - used)))
+    }
 }
 
-fn read_codex_limits(cli: &str) -> Option<(String, Option<String>)> {
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+// Codex 窗口的重置时间：优先用绝对时间 resetsAt（Unix 秒，新版 codex）；
+// 旧版 codex 只有相对的 resetsInSeconds，按当前时间换算；两者都缺（接口未提供）时返回 None
+fn codex_reset_epoch_ms(window: &Value) -> Option<i64> {
+    if let Some(secs) = number(window.get("resetsAt")).or_else(|| number(window.get("reset_at"))) {
+        // 合理的 Unix 秒级时间戳下限（2001-09-09），过滤掉 0 / 负数等占位值
+        if secs >= 1_000_000_000 {
+            return Some(secs.saturating_mul(1000));
+        }
+    }
+    let in_secs = number(window.get("resetsInSeconds")).or_else(|| number(window.get("resets_in_seconds")))?;
+    if in_secs <= 0 {
+        return None;
+    }
+    Some(now_ms().saturating_add(in_secs.saturating_mul(1000)))
+}
+
+fn codex_window(window: &Value) -> Option<(i64, String, Option<i64>)> {
+    let minutes = number(window.get("windowDurationMins"))?;
+    let used = number(window.get("usedPercent")).unwrap_or(100).clamp(0, 100);
+    Some((minutes, format!("{} {}%", window_label(minutes), 100 - used), codex_reset_epoch_ms(window)))
+}
+
+fn read_codex_limits(cli: &str) -> Option<(String, Option<String>, Vec<QuotaReset>)> {
     let mut child = Command::new(cli)
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
@@ -351,11 +386,14 @@ fn read_codex_limits(cli: &str) -> Option<(String, Option<String>)> {
         let mut windows = ["secondary", "primary"].into_iter()
             .filter_map(|name| limits.get(name).and_then(codex_window))
             .collect::<Vec<_>>();
-        windows.sort_by_key(|(minutes, _)| *minutes);
+        windows.sort_by_key(|(minutes, _, _)| *minutes);
         if !windows.is_empty() {
-            let usage = windows.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join(" / ");
+            let usage = windows.iter().map(|(_, text, _)| text.as_str()).collect::<Vec<_>>().join(" / ");
             let plan = limits.get("planType").and_then(Value::as_str).map(readable_plan_name);
-            value = Some((usage, plan));
+            let resets = windows.iter().filter_map(|(minutes, _, reset_at_ms)| {
+                reset_at_ms.map(|ms| QuotaReset { label: window_label(*minutes), resets_at_ms: ms })
+            }).collect();
+            value = Some((usage, plan, resets));
         }
         break;
     }
@@ -370,12 +408,12 @@ fn codex_line() -> QuotaLine {
         "codex"
     };
     for attempt in 0..2 {
-        if let Some((value, plan)) = read_codex_limits(cli) {
-            return QuotaLine { provider: "CODEX", value, plan };
+        if let Some((value, plan, resets)) = read_codex_limits(cli) {
+            return QuotaLine { provider: "CODEX", value, plan, resets };
         }
         if attempt == 0 { std::thread::sleep(std::time::Duration::from_millis(600)); }
     }
-    QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None }
+    QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None, resets: Vec::new() }
 }
 
 #[tauri::command]
@@ -390,7 +428,7 @@ async fn get_quotas(app: tauri::AppHandle) -> Vec<QuotaLine> {
     let deepseek = visible("DEEPSEEK").then(|| deepseek_line(&client, &settings.deepseek_api_key));
     let mut quotas = vec![];
     if let Some(task) = codex {
-        quotas.push(task.await.unwrap_or(QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None }));
+        quotas.push(task.await.unwrap_or(QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None, resets: Vec::new() }));
     }
     if let Some(future) = kimi { quotas.push(future.await); }
     if let Some(future) = glm { quotas.push(future.await); }
@@ -891,6 +929,7 @@ mod tests {
         assert!(settings.glm_api_key.is_empty());
         assert!(settings.deepseek_api_key.is_empty());
         assert!(settings.auto_update);
+        assert!(settings.show_resets);
     }
 
     #[test]
@@ -988,5 +1027,33 @@ mod tests {
         assert_eq!(readable_plan_name("enterprise_team"), "Enterprise Team");
         assert_eq!(kimi_membership_name("LEVEL_INTERMEDIATE"), "Allegretto");
         assert_eq!(kimi_membership_name("LEVEL_PREMIUM"), "Vivace");
+    }
+
+    #[test]
+    fn codex_reset_time_prefers_absolute_timestamp_and_falls_back_to_relative() {
+        // 新版 codex：resetsAt 为 Unix 秒，换算成毫秒透传给前端
+        let absolute = serde_json::json!({ "windowDurationMins": 300, "usedPercent": 10, "resetsAt": 1_700_000_000_i64 });
+        assert_eq!(codex_reset_epoch_ms(&absolute), Some(1_700_000_000_000));
+        // 旧版 codex：只有相对秒数，换算为「当前时间 + 秒数」
+        let relative = serde_json::json!({ "resetsInSeconds": 120 });
+        let got = codex_reset_epoch_ms(&relative).expect("relative reset should resolve");
+        let base = now_ms();
+        assert!((base..=base + 120_000).contains(&got), "dbg got={got} base={base}");
+        // 占位值与缺失字段都不产生重置时间
+        assert_eq!(codex_reset_epoch_ms(&serde_json::json!({ "resetsAt": 0 })), None);
+        assert_eq!(codex_reset_epoch_ms(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn codex_window_carries_label_and_reset_time() {
+        let window = serde_json::json!({ "windowDurationMins": 10_080, "usedPercent": 40, "resetsAt": 1_700_000_000_i64 });
+        let (minutes, text, reset_at_ms) = codex_window(&window).expect("7d window");
+        assert_eq!(minutes, 10_080);
+        assert_eq!(text, "7d 60%");
+        assert_eq!(reset_at_ms, Some(1_700_000_000_000));
+        let plain = serde_json::json!({ "windowDurationMins": 300, "usedPercent": 20 });
+        let (_, text, reset_at_ms) = codex_window(&plain).expect("5h window");
+        assert_eq!(text, "5h 80%");
+        assert_eq!(reset_at_ms, None);
     }
 }
