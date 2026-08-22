@@ -191,7 +191,11 @@ async fn glm_line(client: &reqwest::Client, override_key: &str) -> QuotaLine {
         _ => "暂无额度".into(),
     };
     let plan = payload.pointer("/data/level").and_then(Value::as_str).map(str::to_owned);
-    QuotaLine { provider: "GLM", value, plan, resets: Vec::new() }
+    // nextResetTime 为数字时间戳；未使用的窗口不返回该字段，直接跳过
+    let resets = limits.iter().filter_map(|item| {
+        Some(QuotaReset { label: label(item), resets_at_ms: reset_epoch_ms(item.get("nextResetTime"))? })
+    }).collect();
+    QuotaLine { provider: "GLM", value, plan, resets }
 }
 
 fn now_secs() -> f64 {
@@ -266,7 +270,7 @@ async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
     let Some(payload) = payload else {
         return QuotaLine { provider: "KIMI", value: "未登录".into(), plan: None, resets: Vec::new() };
     };
-    let mut rows: Vec<(String, String)> = vec![];
+    let mut rows: Vec<(String, String, Option<i64>)> = vec![];
     if let Some(limits) = payload["limits"].as_array() {
         for item in limits {
             let detail = item.get("detail").unwrap_or(item);
@@ -278,25 +282,32 @@ async fn kimi_line(client: &reqwest::Client) -> QuotaLine {
             });
             if let Some(limit) = number(detail.get("limit")) {
                 let used = number(detail.get("used")).or_else(|| number(detail.get("remaining")).map(|v| limit - v)).unwrap_or(0);
-                rows.push((name, remaining(used, limit)));
+                rows.push((name, remaining(used, limit), reset_epoch_ms(detail.get("resetTime"))));
             }
         }
     }
     if let Some(usage) = payload["usage"].as_object() {
         if let Some(limit) = number(usage.get("limit")) {
             let used = number(usage.get("used")).or_else(|| number(usage.get("remaining")).map(|v| limit - v)).unwrap_or(0);
-            rows.push(("7d".into(), remaining(used, limit)));
+            rows.push(("7d".into(), remaining(used, limit), reset_epoch_ms(usage.get("resetTime"))));
         }
     }
-    let five_hour = rows.iter().find(|(name, _)| name.contains("5h") || name.contains("5H")).or_else(|| rows.first());
-    let seven_day = rows.iter().find(|(name, _)| name.contains("7d") || name.contains("7D")).or_else(|| rows.get(1));
+    let five_hour = rows.iter().find(|(name, _, _)| name.contains("5h") || name.contains("5H")).or_else(|| rows.first());
+    let seven_day = rows.iter().find(|(name, _, _)| name.contains("7d") || name.contains("7D")).or_else(|| rows.get(1));
     let value = match (five_hour, seven_day) {
-        (Some((_, h5)), Some((_, d7))) => format!("5h {h5} / 7d {d7}"),
-        (Some((name, pct)), None) => format!("{name} {pct}"),
+        (Some((_, h5, _)), Some((_, d7, _))) => format!("5h {h5} / 7d {d7}"),
+        (Some((name, pct, _)), None) => format!("{name} {pct}"),
         _ => "暂无额度".into(),
     };
+    let resets = [five_hour, seven_day]
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, _, reset_at_ms)| {
+            reset_at_ms.map(|ms| QuotaReset { label: name.clone(), resets_at_ms: ms })
+        })
+        .collect();
     let plan = payload.pointer("/user/membership/level").and_then(Value::as_str).map(kimi_membership_name);
-    QuotaLine { provider: "KIMI", value, plan, resets: Vec::new() }
+    QuotaLine { provider: "KIMI", value, plan, resets }
 }
 
 async fn deepseek_line(client: &reqwest::Client, override_key: &str) -> QuotaLine {
@@ -328,14 +339,53 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
+// 各接口的重置时间字段格式不一（GLM 数字时间戳、KIMI ISO 字符串、Codex 秒级时间戳或相对秒数），统一换算为 Unix 毫秒
+fn reset_epoch_ms(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(num) = value.as_i64().or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok())) {
+        return match num {
+            // 毫秒级时间戳
+            n if n >= 1_000_000_000_000 => Some(n),
+            // 秒级时间戳；更小的值视为占位/无效
+            n if n >= 1_000_000_000 => Some(n.saturating_mul(1000)),
+            _ => None,
+        };
+    }
+    value.as_str().and_then(parse_iso_utc_ms)
+}
+
+// 解析 "2026-08-27T01:58:06[.fff]Z" 形式的 UTC 时间为 Unix 毫秒（天数用民用历转换公式计算）
+fn parse_iso_utc_ms(value: &str) -> Option<i64> {
+    let rest = value.trim().strip_suffix('Z').unwrap_or(value.trim());
+    let (date, time) = rest.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let second_ms: i64 = (time_parts.next().unwrap_or("0").parse::<f64>().ok()? * 1000.0).round() as i64;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Days from civil：Howard Hinnant 的民用日期 → Unix 天数算法
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year - era * 400;
+    let month_of_year = (month + 9) % 12;
+    let day_of_year = (153 * month_of_year + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some((days * 86_400 + hour * 3_600 + minute * 60) * 1_000 + second_ms)
+}
+
 // Codex 窗口的重置时间：优先用绝对时间 resetsAt（Unix 秒，新版 codex）；
 // 旧版 codex 只有相对的 resetsInSeconds，按当前时间换算；两者都缺（接口未提供）时返回 None
 fn codex_reset_epoch_ms(window: &Value) -> Option<i64> {
-    if let Some(secs) = number(window.get("resetsAt")).or_else(|| number(window.get("reset_at"))) {
-        // 合理的 Unix 秒级时间戳下限（2001-09-09），过滤掉 0 / 负数等占位值
-        if secs >= 1_000_000_000 {
-            return Some(secs.saturating_mul(1000));
-        }
+    let absolute = reset_epoch_ms(window.get("resetsAt").or_else(|| window.get("reset_at")));
+    if absolute.is_some() {
+        return absolute;
     }
     let in_secs = number(window.get("resetsInSeconds")).or_else(|| number(window.get("resets_in_seconds")))?;
     if in_secs <= 0 {
@@ -1055,5 +1105,24 @@ mod tests {
         let (_, text, reset_at_ms) = codex_window(&plain).expect("5h window");
         assert_eq!(text, "5h 80%");
         assert_eq!(reset_at_ms, None);
+    }
+
+    #[test]
+    fn reset_epoch_ms_handles_timestamps_and_iso_strings() {
+        // GLM：数字毫秒 / 秒时间戳
+        assert_eq!(reset_epoch_ms(Some(&serde_json::json!(1_770_000_000_000_i64))), Some(1_770_000_000_000));
+        assert_eq!(reset_epoch_ms(Some(&serde_json::json!("1770000000"))), Some(1_770_000_000_000));
+        // KIMI：ISO 8601 UTC 字符串（含小数秒）
+        let iso: Value = "2026-08-27T01:58:06Z".into();
+        assert_eq!(reset_epoch_ms(Some(&iso)), Some(1_787_795_886_000));
+        let iso_fractional: Value = "2026-08-27T01:58:06.064554Z".into();
+        assert_eq!(reset_epoch_ms(Some(&iso_fractional)), Some(1_787_795_886_065));
+        // 占位值与垃圾输入返回 None
+        assert_eq!(reset_epoch_ms(Some(&serde_json::json!(0))), None);
+        assert_eq!(reset_epoch_ms(Some(&serde_json::json!("not-a-time"))), None);
+        assert_eq!(reset_epoch_ms(None), None);
+        // 跨月边界（闰年）也正确
+        let leap: Value = "2024-02-29T23:59:59Z".into();
+        assert_eq!(reset_epoch_ms(Some(&leap)), Some(1_709_251_199_000));
     }
 }

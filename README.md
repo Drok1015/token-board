@@ -12,7 +12,7 @@
 - 展示 CODEX、KIMI、GLM、DEEPSEEK 的可用额度或余额
 - 自动读取本机已登录或已配置的账号；不会将凭据写入项目或上传到 GitHub
 - 在供应商名称后显示当前订阅套餐，例如 Codex Plus、Kimi Allegretto 和 GLM max
-- 供应商名称后可显示沙漏图标，鼠标悬浮查看各额度窗口的重置时间（如 CODEX 的 5h / 7d）；可在设置中关闭
+- 供应商行尾可显示沙漏图标（⏳），悬浮 0.5 秒查看说明：CODEX / KIMI / GLM 显示各额度窗口的重置时间（5h、7d 等），DeepSeek 显示高峰期提示（周一到周五 9:00–12:00、14:00–18:00，期间余额显示为红色）；可在设置中关闭
 - 每 5 分钟自动刷新，右上角展示距上次刷新的时间（刚刚刷新 / N 分钟前更新），底部标注可右键手动刷新
 - 每 5 分钟随额度刷新一起查询 [codex-resets.com](https://codex-resets.com/) 的公开 API（追踪 OpenAI 官宣的额度重置），检测到新重置事件时弹出系统对话框提醒；同一事件只提醒一次，再次重置会重新提醒
 - 透明、无 Dock 图标的桌面悬浮窗口，可跨桌面显示并直接拖动
@@ -86,7 +86,7 @@ src-tauri/target/release/bundle/macos/Token 看板.app
 
 ## 自动更新
 
-从 v0.2.10 起内置自动更新（默认开启，可在设置页关闭「自动更新」）。开启后应用启动时及每 6 小时检查一次 GitHub 最新 Release 的 `latest.json`，发现新版本会在后台下载并安装，完成后自动重启看板；关闭后不会再自动检查或安装，但右键菜单的「检查更新」仍可随时手动升级。更新包使用 minisign 签名（公钥内置在 `tauri.conf.json`），CI 发布时用仓库 secret `TAURI_SIGNING_PRIVATE_KEY` 签名。
+从 v0.2.10 起内置自动更新（默认开启，可在设置页关闭「自动更新」）。开启后应用启动时及每 2 小时检查一次 GitHub 最新 Release 的 `latest.json`，发现新版本会在后台下载并安装，完成后自动重启看板；关闭后不会再自动检查或安装，但右键菜单的「检查更新」仍可随时手动升级。更新包使用 minisign 签名（公钥内置在 `tauri.conf.json`），CI 发布时用仓库 secret `TAURI_SIGNING_PRIVATE_KEY` 签名。
 
 本地打包如需生成更新产物，先导出私钥：
 

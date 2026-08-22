@@ -69,7 +69,7 @@ export function mountSettings() {
           <label class="setting-row setting-toggle">
             <span>
               <strong>显示重置时间图标</strong>
-              <small>在供应商名称后显示沙漏，悬浮查看 5h / 7d 额度重置时间（当前仅 CODEX 提供）</small>
+              <small>沙漏图标悬浮 0.5 秒显示窗口重置时间（CODEX / KIMI / GLM）或 DeepSeek 高峰期说明</small>
             </span>
             <input id="show-resets" type="checkbox">
           </label>
@@ -107,7 +107,7 @@ export function mountSettings() {
           <label class="setting-row setting-toggle">
             <span>
               <strong>自动更新</strong>
-              <small>启动及每 6 小时检查新版本并自动安装，右键菜单可随时手动检查</small>
+              <small>启动及每 2 小时检查新版本并自动安装，右键菜单可随时手动检查</small>
             </span>
             <input id="auto-update" type="checkbox">
           </label>

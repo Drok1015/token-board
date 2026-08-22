@@ -9,9 +9,11 @@ body { margin: 0; overflow: hidden; background: transparent; user-select: none; 
 .screen * { pointer-events: none; }
 .screen-title { display: flex; align-items: center; height: 26px; padding-bottom: 6px; color: #9bffc0; font-size: 12px; font-weight: 800; letter-spacing: .4px; border-bottom: 1px solid rgb(147 255 185 / 35%); }.signal { margin-left: auto; color: #63ff9b; animation: blink 1.4s steps(2) infinite; }.updated { margin-left: 6px; color: #75af89; font-size: 8px; font-weight: 500; line-height: 15px; }
 .quota-row { display: flex; gap: 4px; height: 25px; align-items: center; border-bottom: 1px solid rgb(147 255 185 / 14%); color: #e2ffeb; font-size: 10px; white-space: nowrap; }.quota-row:last-child { border-bottom: 0; }.quota-row b { flex: 0 0 64px; color: #78ffac; font-size: 9px; letter-spacing: .2px; }.quota-value { margin-left: auto; overflow: visible; text-overflow: clip; }.plan-badge { flex: 0 0 auto; max-width: 66px; overflow: hidden; padding: 2px 6px; border-radius: 3px; color: #bdf4ce; background: rgb(95 160 119 / 34%); font-size: 8px; line-height: 13px; letter-spacing: .2px; text-overflow: ellipsis; }.plan-badge:empty { display: none; }
-/* 沙漏重置图标：默认隐藏，拿到重置数据且设置开启时显示；pointer-events 打开才能响应悬浮 */
-.reset-badge { display: none; flex: 0 0 auto; padding: 2px 4px; border-radius: 3px; color: #bdf4ce; background: rgb(95 160 119 / 34%); font-size: 8px; line-height: 13px; cursor: default; pointer-events: auto; }
+/* 沙漏重置图标：默认隐藏，拿到重置数据且设置开启时显示；透明底色不干扰行内排版，pointer-events 打开才能响应悬浮 */
+.reset-badge { display: none; flex: 0 0 auto; padding: 2px 1px; border-radius: 3px; color: #9bffc0; font-size: 8px; line-height: 13px; cursor: default; pointer-events: auto; position: relative; top: 1px; }
 .reset-badge.visible { display: inline-block; }
+/* 重置时间提示气泡：悬浮重置图标 0.5 秒后出现，固定定位于悬浮窗可视范围内 */
+.reset-tip { position: fixed; z-index: 20; max-width: calc(100vw - 16px); padding: 5px 9px; border: 1px solid #6aa982; border-radius: 7px; color: #d9ffe8; background: rgb(7 24 15 / 96%); font-size: 10px; line-height: 15px; letter-spacing: .3px; white-space: pre-line; box-shadow: 0 4px 12px rgb(4 18 14 / 45%); pointer-events: none; }
 .screen-footer { display: flex; justify-content: space-between; padding-top: 4px; color: #75af89; font-size: 8px; line-height: 14px; }
 .plans-hidden .screen { width: 220px; }
 .plans-hidden .plan-badge { display: none; }

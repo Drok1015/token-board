@@ -42,14 +42,15 @@ export function mountBoard() {
       <section class="board" aria-label="Token 看板" data-tauri-drag-region>
         <div class="screen" aria-live="polite" data-tauri-drag-region>
           <div class="screen-title">TOKEN 看板 <span class="signal">●</span><span class="updated" id="updated">自动刷新</span></div>
-          <div class="quota-row" data-provider="CODEX"><b>CODEX</b><span class="reset-badge" id="codex-reset" aria-label="额度重置时间">⏳</span><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span></div>
-          <div class="quota-row" data-provider="KIMI"><b>KIMI</b><span class="reset-badge" id="kimi-reset" aria-label="额度重置时间">⏳</span><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span></div>
-          <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="reset-badge" id="glm-reset" aria-label="额度重置时间">⏳</span><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span></div>
-          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="reset-badge" id="deepseek-reset" aria-label="额度重置时间">⏳</span><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span></div>
+          <div class="quota-row" data-provider="CODEX"><b>CODEX</b><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span><span class="reset-badge" id="codex-reset" aria-label="额度重置时间">⏳</span></div>
+          <div class="quota-row" data-provider="KIMI"><b>KIMI</b><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span><span class="reset-badge" id="kimi-reset" aria-label="额度重置时间">⏳</span></div>
+          <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span><span class="reset-badge" id="glm-reset" aria-label="额度重置时间">⏳</span></div>
+          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span><span class="reset-badge" id="deepseek-reset" aria-label="额度重置时间">⏳</span></div>
           <div class="screen-footer"><span>5分钟刷新一次，可右键手动刷新</span><span class="version" id="version"></span></div>
         </div>
       </section>
       <button class="edge-tab" id="edge-tab" type="button" aria-label="展开 Token 看板" title="点击展开；上下拖动调整位置">›</button>
+      <div class="reset-tip" id="reset-tip" hidden></div>
     </main>`;
 
   const ids = { CODEX: 'codex', KIMI: 'kimi', GLM: 'glm', DEEPSEEK: 'deepseek' };
@@ -71,7 +72,7 @@ export function mountBoard() {
   let refreshInProgress = false;
   let codexLastResetAt = null; // 最近一次已知的重置事件时间（ISO 字符串），用于识别新重置
   let lastRefreshAt = null;
-  let resetsByProvider = {}; // 各供应商最近一次刷新拿到的窗口重置时间，供沙漏图标悬浮展示
+  let resetsByProvider = {}; // 各供应商最近一次刷新拿到的窗口重置时间，供重置图标悬浮展示
   let boardHeight = BOARD_HEIGHT; // 最近一次的实测窗口高度；贴边隐藏时 DOM 不可见，用缓存值
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -361,8 +362,12 @@ export function mountBoard() {
     }).join(' / ');
   }
 
-  // 沙漏图标：悬浮显示各额度窗口（如 CODEX 的 5h / 7d）的重置时间；
-  // 无重置数据或设置关闭时不显示。用原生 title 提示，不受悬浮窗自身尺寸裁剪
+  // 重置图标：悬浮 0.5 秒后显示自绘提示气泡，列出各额度窗口（如 CODEX / KIMI / GLM 的
+  // 5h、7d）的重置时间；无重置数据或设置关闭时图标隐藏。不用原生 title 是因为其延迟不可控
+  const RESET_TIP_DELAY = 500;
+  const resetTip = document.querySelector('#reset-tip');
+  let resetTipTimer = null;
+
   function formatResetTime(ms) {
     const date = new Date(ms);
     if (Number.isNaN(date.getTime())) return '未知';
@@ -372,22 +377,83 @@ export function mountBoard() {
       : `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
   }
 
+  function hideResetTip() {
+    if (resetTipTimer !== null) {
+      window.clearTimeout(resetTipTimer);
+      resetTipTimer = null;
+    }
+    resetTip.hidden = true;
+  }
+
+  // 高峰期：周一到周五 9:00–12:00、14:00–18:00（本机时区），期间 DeepSeek 余额标红
+  function isPeakPeriod(date = new Date()) {
+    const weekday = date.getDay();
+    if (weekday === 0 || weekday === 6) return false;
+    const minutes = date.getHours() * 60 + date.getMinutes();
+    return (minutes >= 9 * 60 && minutes < 12 * 60) || (minutes >= 14 * 60 && minutes < 18 * 60);
+  }
+
+  const DEEPSEEK_RESET_TIP = '高峰期为周一到周五 9:00–12:00、14:00–18:00\n处于高峰期时余额为红色';
+
+  // 每分钟重估一次 DeepSeek 高峰期着色（额度本身 5 分钟才刷新一次）
+  function applyPeakColor() {
+    const node = document.querySelector(`#${ids.DEEPSEEK}`);
+    // 状态文案（读取中/失败/未配置）不参与高峰期着色
+    if (node && !['读取中…', '读取失败', '未配置'].includes(node.textContent)) {
+      node.classList.toggle('pct-red', isPeakPeriod());
+    }
+  }
+
+  function showResetTip(node) {
+    const provider = node.dataset.provider;
+    let text;
+    if (provider === 'DEEPSEEK') {
+      // DeepSeek 没有窗口化额度，重置图标悬浮展示固定的高峰期说明
+      text = DEEPSEEK_RESET_TIP;
+    } else {
+      const resets = resetsByProvider[provider] || [];
+      if (resets.length === 0) return;
+      text = resets
+        .map(({ label, resetsAtMs }) => `${label} 重置：${formatResetTime(resetsAtMs)}`)
+        .join('\n');
+    }
+    resetTip.textContent = text;
+    resetTip.hidden = false;
+    // 气泡跟随图标位置，优先显示在下方；贴近窗口底部时翻到上方，并夹在窗口可视范围内
+    const badgeRect = node.getBoundingClientRect();
+    const tipRect = resetTip.getBoundingClientRect();
+    const left = clamp(badgeRect.left + badgeRect.width / 2 - tipRect.width / 2, 8, window.innerWidth - tipRect.width - 8);
+    let top = badgeRect.bottom + 6;
+    if (top + tipRect.height > window.innerHeight - 4) top = badgeRect.top - tipRect.height - 6;
+    resetTip.style.left = `${Math.round(left)}px`;
+    resetTip.style.top = `${Math.round(Math.max(top, 4))}px`;
+  }
+
   function renderResetBadges() {
     Object.entries(resetIds).forEach(([provider, id]) => {
       const node = document.querySelector(`#${id}`);
       if (!node) return;
-      const resets = settings.showResets ? (resetsByProvider[provider] || []) : [];
-      if (resets.length === 0) {
-        node.classList.remove('visible');
-        node.removeAttribute('title');
-        return;
-      }
-      node.classList.add('visible');
-      node.title = resets
-        .map(({ label, resetsAtMs }) => `${label} 重置：${formatResetTime(resetsAtMs)}`)
-        .join('\n');
+      node.dataset.provider = provider;
+      // DEEPSEEK 重置图标是固定的高峰期说明，不受额度数据影响
+      const hasTip = settings.showResets && (provider === 'DEEPSEEK' || (resetsByProvider[provider] || []).length > 0);
+      node.classList.toggle('visible', hasTip);
+      if (!hasTip) hideResetTip();
     });
   }
+
+  Object.entries(resetIds).forEach(([provider, id]) => {
+    const node = document.querySelector(`#${id}`);
+    if (!node) return;
+    node.dataset.provider = provider;
+    node.addEventListener('mouseenter', () => {
+      hideResetTip();
+      resetTipTimer = window.setTimeout(() => {
+        resetTipTimer = null;
+        showResetTip(node);
+      }, RESET_TIP_DELAY);
+    });
+    node.addEventListener('mouseleave', hideResetTip);
+  });
 
   async function refreshQuotas() {
     if (refreshInProgress) return;
@@ -403,6 +469,7 @@ export function mountBoard() {
         resetsByProvider[provider] = Array.isArray(resets) ? resets : [];
       });
       renderResetBadges();
+      applyPeakColor();
       lastRefreshAt = Date.now();
       renderRefreshElapsed();
       await maybeAlertCodexReset();
@@ -539,4 +606,5 @@ export function mountBoard() {
   refreshQuotas().catch(console.error);
   window.setInterval(() => { refreshQuotas().catch(console.error); }, 5 * 60 * 1000);
   window.setInterval(renderRefreshElapsed, 60 * 1000);
+  window.setInterval(applyPeakColor, 60 * 1000);
 }
