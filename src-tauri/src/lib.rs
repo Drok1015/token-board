@@ -548,6 +548,9 @@ fn save_settings(app: tauri::AppHandle, settings: BoardSettings) -> Result<(), S
 struct TrayQuotaLine {
     provider: String,
     value: String,
+    /// 高峰期标识，由前端（拥有本机时区信息）按分钟计算后随刷新推送
+    #[serde(default)]
+    peak: bool,
 }
 
 #[derive(Default)]
@@ -594,9 +597,11 @@ impl TrayColor {
     }
 }
 
-// 状态栏彩色文字分段：供应商名固定白色且字号更大，各窗口百分比各自着色；元素间距在渲染时统一加
-fn tray_segments(provider: &str, value: &str) -> Vec<(String, TrayColor, f32)> {
-    let provider = provider.to_uppercase();
+// 状态栏彩色文字分段：供应商名固定白色且字号更大，各窗口百分比各自着色；元素间距在渲染时统一加。
+// 高峰期在供应商名后缀 (高)（与看板一致）；额度处于失败/未配置状态时不加，避免状态文案被稀释
+fn tray_segments(provider: &str, value: &str, peak: bool) -> Vec<(String, TrayColor, f32)> {
+    let has_value = !value.contains("失败") && !value.starts_with('未');
+    let provider = if peak && has_value { format!("{}(高)", provider.to_uppercase()) } else { provider.to_uppercase() };
     let parts: Vec<(&str, u64)> = value
         .split(" / ")
         .filter_map(|part| part.rsplit_once(' ').map(|(_, tail)| tail))
@@ -757,7 +762,7 @@ fn refresh_tray_title(app: &tauri::AppHandle) {
     let Some(tray) = app.tray_by_id("tray") else { return };
     let _ = tray.set_visible(settings.show_tray);
     match line {
-        Some(line) => match render_tray_icon(&tray_segments(&line.provider, &line.value)) {
+        Some(line) => match render_tray_icon(&tray_segments(&line.provider, &line.value, line.peak)) {
             Some(image) => {
                 let _ = tray.set_icon(Some(image));
                 let _ = tray.set_icon_as_template(false);
@@ -1015,7 +1020,7 @@ mod tests {
 
     #[test]
     fn tray_segments_name_stays_white_and_each_window_colored() {
-        let segments = tray_segments("GLM", "5h 90% / 7d 45%");
+        let segments = tray_segments("GLM", "5h 90% / 7d 45%", false);
         assert_eq!(
             segments,
             vec![
@@ -1025,26 +1030,47 @@ mod tests {
             ]
         );
         assert_eq!(
-            tray_segments("CODEX", "7d 22%"),
+            tray_segments("CODEX", "7d 22%", false),
             vec![
                 ("CODEX".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
                 ("22%".to_owned(), TrayColor::Red, TRAY_FONT_PX)
             ]
         );
         assert_eq!(
-            tray_segments("DEEPSEEK", "余额 ¥7.38"),
+            tray_segments("DEEPSEEK", "余额 ¥7.38", false),
             vec![
                 ("DEEPSEEK".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
                 ("¥7.38".to_owned(), TrayColor::White, TRAY_FONT_PX)
             ]
         );
         assert_eq!(
-            tray_segments("CODEX", "读取失败"),
+            tray_segments("CODEX", "读取失败", false),
             vec![
                 ("CODEX".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
                 ("读取失败".to_owned(), TrayColor::Red, TRAY_FONT_PX)
             ]
         );
+    }
+
+    #[test]
+    fn tray_segments_append_peak_marker_to_provider_name() {
+        // 高峰期：名称后缀 (高)，窗口颜色不变；小写供应商名同样可用
+        assert_eq!(
+            tray_segments("GLM", "5h 41% / 7d 86%", true)[0],
+            ("GLM(高)".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX)
+        );
+        assert_eq!(
+            tray_segments("DEEPSEEK", "余额 ¥14.99", true),
+            vec![
+                ("DEEPSEEK(高)".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
+                ("¥14.99".to_owned(), TrayColor::White, TRAY_FONT_PX)
+            ]
+        );
+        // 失败/未配置状态即使处于高峰期也不加标识
+        assert_eq!(tray_segments("GLM", "读取失败", true)[0], ("GLM".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX));
+        assert_eq!(tray_segments("GLM", "未配置", true)[0], ("GLM".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX));
+        // 非“读额”型（DeepSeek 中文余额）带高峰期时渲染不 panic 且含 CJK 字形
+        assert!(render_tray_icon(&tray_segments("DEEPSEEK", "余额 ¥14.99", true)).is_some());
     }
 
     #[test]
@@ -1067,7 +1093,7 @@ mod tests {
         }
         assert!(std::ptr::eq(fonts.for_char('A'), &fonts.primary));
         // 渲染整条「读取失败」不应 panic 且所有汉字都有真实字形
-        let segments = tray_segments("CODEX", "读取失败");
+        let segments = tray_segments("CODEX", "读取失败", false);
         assert!(render_tray_icon(&segments).is_some());
     }
 

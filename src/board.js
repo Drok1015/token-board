@@ -73,6 +73,8 @@ export function mountBoard() {
   let codexLastResetAt = null; // 最近一次已知的重置事件时间（ISO 字符串），用于识别新重置
   let lastRefreshAt = null;
   let resetsByProvider = {}; // 各供应商最近一次刷新拿到的窗口重置时间，供重置图标悬浮展示
+  let lastTrayLines = null; // 最近一次推给托盘的数据（不含 peak），高峰期切换时补发
+  let prevPeakKey = ''; // 上次各供应商的高峰期状态，变更时才重推托盘
   let boardHeight = BOARD_HEIGHT; // 最近一次的实测窗口高度；贴边隐藏时 DOM 不可见，用缓存值
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -155,7 +157,8 @@ export function mountBoard() {
     renderResetBadges();
   }
 
-  // 自动更新默认关闭：开启后立即检查一次并每 2 小时轮询；关闭时清除轮询（右键菜单手动检查不受影响）
+  // 自动更新默认开启（设置可关）：开启后立即检查一次并每 15 分钟轮询（发布新版后最多 ~15 分钟内跟上）；
+  // 关闭时清除轮询（右键菜单手动检查不受影响）。检查设 30 秒超时，GitHub 抽风时不挂死，等下轮重试
   function scheduleAutoUpdate() {
     if (updateTimer !== null) {
       window.clearInterval(updateTimer);
@@ -163,7 +166,7 @@ export function mountBoard() {
     }
     if (!settings.autoUpdate) return;
     checkForUpdates().catch(console.error);
-    updateTimer = window.setInterval(() => { checkForUpdates().catch(console.error); }, 2 * 60 * 60 * 1000);
+    updateTimer = window.setInterval(() => { checkForUpdates().catch(console.error); }, 15 * 60 * 1000);
   }
 
   function scheduleAutoHide() {
@@ -408,16 +411,34 @@ export function mountBoard() {
     DEEPSEEK: '高峰期为周一到周五 9:00–12:00、14:00–18:00，期间名称后显示(高)',
   };
 
-  // 每分钟重估一次高峰期(高)标识显隐（额度本身 5 分钟才刷新一次）
+  // 每分钟重估一次高峰期(高)标识显隐（额度本身 5 分钟才刷新一次）；
+  // 高峰状态翻转时同步重推托盘，让菜单栏的供应商名也实时带上 (高)
   function applyPeakBadges(now = new Date()) {
+    const peakByProvider = {};
     Object.entries(PEAK_BADGE_IDS).forEach(([provider, id]) => {
+      peakByProvider[provider] = PEAK_CHECKS[provider](now);
       const badge = document.querySelector(`#${id}`);
       if (!badge) return;
       const valueNode = document.querySelector(`#${ids[provider]}`);
       // 状态文案（读取中/失败/未配置）不显示高峰期标识
       const hasValue = Boolean(valueNode) && !['读取中…', '读取失败', '未配置'].includes(valueNode.textContent);
-      badge.classList.toggle('visible', hasValue && PEAK_CHECKS[provider](now));
+      badge.classList.toggle('visible', hasValue && peakByProvider[provider]);
     });
+    const peakKey = Object.entries(peakByProvider).map(([name, inPeak]) => `${name}:${inPeak ? 1 : 0}`).join(',');
+    if (peakKey !== prevPeakKey) {
+      prevPeakKey = peakKey;
+      pushTrayLines();
+    }
+  }
+
+  // 把最近一次额度数据附带当前高峰期状态推给托盘渲染；额度尚未拉到时不推
+  function pushTrayLines() {
+    if (!lastTrayLines || refreshInProgress) return;
+    invoke('update_tray', { lines: lastTrayLines.map(({ provider, value }) => ({
+      provider,
+      value,
+      peak: Boolean(PEAK_CHECKS[provider] && PEAK_CHECKS[provider]()),
+    })) }).catch(console.error);
   }
 
   function showResetTip(node) {
@@ -493,7 +514,8 @@ export function mountBoard() {
       lastRefreshAt = Date.now();
       renderRefreshElapsed();
       await maybeAlertCodexReset();
-      invoke('update_tray', { lines }).catch(console.error);
+      lastTrayLines = lines.map(({ provider, value }) => ({ provider, value }));
+      pushTrayLines();
     } catch (error) {
       console.error(error);
       Object.values(ids).forEach((id) => {
@@ -601,7 +623,7 @@ export function mountBoard() {
     if (!manual && !settings.autoUpdate) return;
     let update = null;
     try {
-      update = await checkUpdate();
+      update = await checkUpdate({ timeout: 30 * 1000 });
     } catch (error) {
       console.error('检查更新失败', error);
       if (manual) updated.textContent = '检查更新失败';
