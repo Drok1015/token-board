@@ -515,7 +515,6 @@ export function mountBoard() {
       renderRefreshElapsed();
       await maybeAlertCodexReset();
       lastTrayLines = lines.map(({ provider, value }) => ({ provider, value }));
-      pushTrayLines();
     } catch (error) {
       console.error(error);
       Object.values(ids).forEach((id) => {
@@ -525,6 +524,8 @@ export function mountBoard() {
     } finally {
       refreshInProgress = false;
     }
+    // 注意：必须在 finally 复位 refreshInProgress 之后推送，否则会被自身防守拦截
+    pushTrayLines();
   }
 
   async function createContextMenu() {
