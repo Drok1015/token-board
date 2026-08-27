@@ -44,8 +44,8 @@ export function mountBoard() {
           <div class="screen-title">TOKEN 看板 <span class="signal">●</span><span class="updated" id="updated">自动刷新</span></div>
           <div class="quota-row" data-provider="CODEX"><b>CODEX</b><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span><span class="reset-badge" id="codex-reset" aria-label="额度重置时间">⏳</span></div>
           <div class="quota-row" data-provider="KIMI"><b>KIMI</b><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span><span class="reset-badge" id="kimi-reset" aria-label="额度重置时间">⏳</span></div>
-          <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="peak-badge" id="glm-peak">(高)</span><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span><span class="reset-badge" id="glm-reset" aria-label="额度重置时间">⏳</span></div>
-          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="peak-badge" id="deepseek-peak">(高)</span><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span><span class="reset-badge" id="deepseek-reset" aria-label="额度重置时间">⏳</span></div>
+          <div class="quota-row" data-provider="GLM"><b>GLM<span class="peak-badge" id="glm-peak">(高)</span></b><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span><span class="reset-badge" id="glm-reset" aria-label="额度重置时间">⏳</span></div>
+          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK<span class="peak-badge" id="deepseek-peak">(高)</span></b><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span><span class="reset-badge" id="deepseek-reset" aria-label="额度重置时间">⏳</span></div>
           <div class="screen-footer"><span>5分钟刷新一次，可右键手动刷新</span><span class="version" id="version"></span></div>
         </div>
       </section>
