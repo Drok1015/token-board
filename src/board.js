@@ -44,8 +44,8 @@ export function mountBoard() {
           <div class="screen-title">TOKEN 看板 <span class="signal">●</span><span class="updated" id="updated">自动刷新</span></div>
           <div class="quota-row" data-provider="CODEX"><b>CODEX</b><span class="plan-badge" id="codex-plan"></span><span class="quota-value" id="codex">读取中…</span><span class="reset-badge" id="codex-reset" aria-label="额度重置时间">⏳</span></div>
           <div class="quota-row" data-provider="KIMI"><b>KIMI</b><span class="plan-badge" id="kimi-plan"></span><span class="quota-value" id="kimi">读取中…</span><span class="reset-badge" id="kimi-reset" aria-label="额度重置时间">⏳</span></div>
-          <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span><span class="reset-badge" id="glm-reset" aria-label="额度重置时间">⏳</span></div>
-          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span><span class="reset-badge" id="deepseek-reset" aria-label="额度重置时间">⏳</span></div>
+          <div class="quota-row" data-provider="GLM"><b>GLM</b><span class="peak-badge" id="glm-peak">(高)</span><span class="plan-badge" id="glm-plan"></span><span class="quota-value" id="glm">读取中…</span><span class="reset-badge" id="glm-reset" aria-label="额度重置时间">⏳</span></div>
+          <div class="quota-row" data-provider="DEEPSEEK"><b>DEEPSEEK</b><span class="peak-badge" id="deepseek-peak">(高)</span><span class="plan-badge" id="deepseek-plan"></span><span class="quota-value" id="deepseek">读取中…</span><span class="reset-badge" id="deepseek-reset" aria-label="额度重置时间">⏳</span></div>
           <div class="screen-footer"><span>5分钟刷新一次，可右键手动刷新</span><span class="version" id="version"></span></div>
         </div>
       </section>
@@ -385,23 +385,39 @@ export function mountBoard() {
     resetTip.hidden = true;
   }
 
-  // 高峰期：周一到周五 9:00–12:00、14:00–18:00（本机时区），期间 DeepSeek 余额标红
-  function isPeakPeriod(date = new Date()) {
-    const weekday = date.getDay();
-    if (weekday === 0 || weekday === 6) return false;
+  const isWorkday = (date) => date.getDay() !== 0 && date.getDay() !== 6;
+
+  // DeepSeek 高峰期：周一到周五 9:00–12:00、14:00–18:00（本机时区）
+  function isDeepSeekPeak(date = new Date()) {
+    if (!isWorkday(date)) return false;
     const minutes = date.getHours() * 60 + date.getMinutes();
     return (minutes >= 9 * 60 && minutes < 12 * 60) || (minutes >= 14 * 60 && minutes < 18 * 60);
   }
 
-  const DEEPSEEK_RESET_TIP = '高峰期为周一到周五 9:00–12:00、14:00–18:00\n处于高峰期时余额为红色';
+  // GLM 高峰期：周一到周五 14:00–18:00（智谱官方规则，按北京时间 UTC+8 判定，此期间积分消耗加倍）；
+  // 先把时刻换算到北京时间再取星期与小时，不受本机时区影响
+  function isGlmPeak(date = new Date()) {
+    const beijing = new Date(date.getTime() + (date.getTimezoneOffset() + 480) * 60000);
+    return isWorkday(beijing) && beijing.getHours() >= 14 && beijing.getHours() < 18;
+  }
 
-  // 每分钟重估一次 DeepSeek 高峰期着色（额度本身 5 分钟才刷新一次）
-  function applyPeakColor() {
-    const node = document.querySelector(`#${ids.DEEPSEEK}`);
-    // 状态文案（读取中/失败/未配置）不参与高峰期着色
-    if (node && !['读取中…', '读取失败', '未配置'].includes(node.textContent)) {
-      node.classList.toggle('pct-red', isPeakPeriod());
-    }
+  const PEAK_CHECKS = { GLM: isGlmPeak, DEEPSEEK: isDeepSeekPeak };
+  const PEAK_BADGE_IDS = { GLM: 'glm-peak', DEEPSEEK: 'deepseek-peak' };
+  const PEAK_TIPS = {
+    GLM: '高峰期为周一到周五 14:00–18:00（北京时间），期间积分消耗加倍',
+    DEEPSEEK: '高峰期为周一到周五 9:00–12:00、14:00–18:00，期间名称后显示(高)',
+  };
+
+  // 每分钟重估一次高峰期(高)标识显隐（额度本身 5 分钟才刷新一次）
+  function applyPeakBadges(now = new Date()) {
+    Object.entries(PEAK_BADGE_IDS).forEach(([provider, id]) => {
+      const badge = document.querySelector(`#${id}`);
+      if (!badge) return;
+      const valueNode = document.querySelector(`#${ids[provider]}`);
+      // 状态文案（读取中/失败/未配置）不显示高峰期标识
+      const hasValue = Boolean(valueNode) && !['读取中…', '读取失败', '未配置'].includes(valueNode.textContent);
+      badge.classList.toggle('visible', hasValue && PEAK_CHECKS[provider](now));
+    });
   }
 
   function showResetTip(node) {
@@ -409,13 +425,17 @@ export function mountBoard() {
     let text;
     if (provider === 'DEEPSEEK') {
       // DeepSeek 没有窗口化额度，重置图标悬浮展示固定的高峰期说明
-      text = DEEPSEEK_RESET_TIP;
+      text = PEAK_TIPS.DEEPSEEK;
     } else {
       const resets = resetsByProvider[provider] || [];
-      if (resets.length === 0) return;
-      text = resets
-        .map(({ label, resetsAtMs }) => `${label} 重置：${formatResetTime(resetsAtMs)}`)
-        .join('\n');
+      if (resets.length === 0) {
+        text = PEAK_TIPS[provider];
+      } else {
+        text = resets
+          .map(({ label, resetsAtMs }) => `${label} 重置：${formatResetTime(resetsAtMs)}`)
+          .join('\n');
+        if (PEAK_TIPS[provider]) text += `\n${PEAK_TIPS[provider]}`;
+      }
     }
     resetTip.textContent = text;
     resetTip.hidden = false;
@@ -469,7 +489,7 @@ export function mountBoard() {
         resetsByProvider[provider] = Array.isArray(resets) ? resets : [];
       });
       renderResetBadges();
-      applyPeakColor();
+      applyPeakBadges();
       lastRefreshAt = Date.now();
       renderRefreshElapsed();
       await maybeAlertCodexReset();
@@ -606,5 +626,5 @@ export function mountBoard() {
   refreshQuotas().catch(console.error);
   window.setInterval(() => { refreshQuotas().catch(console.error); }, 5 * 60 * 1000);
   window.setInterval(renderRefreshElapsed, 60 * 1000);
-  window.setInterval(applyPeakColor, 60 * 1000);
+  window.setInterval(() => applyPeakBadges(), 60 * 1000);
 }
