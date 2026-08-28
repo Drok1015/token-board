@@ -22,6 +22,9 @@ const FADE_DURATION = 100;
 // 官方重置追踪站的公开 API：返回 @thsottiaux 宣布的重置事件，按时间倒序，时间为 UTC
 const CODEX_RESETS_API = 'https://codex-resets.com/api/resets';
 const CODEX_RESETS_TIMEOUT = 15 * 1000;
+const AUTO_UPDATE_INTERVAL = 2 * 60 * 60 * 1000;
+const QUOTA_REFRESH_INTERVAL = 5 * 60 * 1000;
+const MINUTE_TICK_INTERVAL = 60 * 1000;
 const DEFAULT_SETTINGS = {
   autoHide: false,
   hideDelaySeconds: 10,
@@ -69,6 +72,7 @@ export function mountBoard() {
   let settings = { ...DEFAULT_SETTINGS };
   let autoHideTimer = null;
   let updateTimer = null;
+  let updateCheckInProgress = false;
   let refreshInProgress = false;
   let codexLastResetAt = null; // 最近一次已知的重置事件时间（ISO 字符串），用于识别新重置
   let lastRefreshAt = null;
@@ -76,6 +80,8 @@ export function mountBoard() {
   let lastTrayLines = null; // 最近一次推给托盘的数据（不含 peak），高峰期切换时补发
   let prevPeakKey = ''; // 上次各供应商的高峰期状态，变更时才重推托盘
   let boardHeight = BOARD_HEIGHT; // 最近一次的实测窗口高度；贴边隐藏时 DOM 不可见，用缓存值
+  let moveHandling = false;
+  let pendingMovePosition = null;
 
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
   const wait = (milliseconds) => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
@@ -157,7 +163,7 @@ export function mountBoard() {
     renderResetBadges();
   }
 
-  // 自动更新默认开启（设置可关）：开启后立即检查一次并每 15 分钟轮询（发布新版后最多 ~15 分钟内跟上）；
+  // 自动更新默认开启（设置可关）：开启后立即检查一次并每 2 小时轮询；
   // 关闭时清除轮询（右键菜单手动检查不受影响）。检查设 30 秒超时，GitHub 抽风时不挂死，等下轮重试
   function scheduleAutoUpdate() {
     if (updateTimer !== null) {
@@ -166,7 +172,7 @@ export function mountBoard() {
     }
     if (!settings.autoUpdate) return;
     checkForUpdates().catch(console.error);
-    updateTimer = window.setInterval(() => { checkForUpdates().catch(console.error); }, 15 * 60 * 1000);
+    updateTimer = window.setInterval(() => { checkForUpdates().catch(console.error); }, AUTO_UPDATE_INTERVAL);
   }
 
   function scheduleAutoHide() {
@@ -285,6 +291,24 @@ export function mountBoard() {
     else if (rightGap <= SNAP_DISTANCE) await collapseAtEdge('right', monitor, physicalPosition);
   }
 
+  // 拖动窗口时 onMoved 可能在一次 IPC 尚未完成前连续触发；只处理最新坐标，避免堆积
+  // currentMonitor / outerSize / setPosition 调用造成主线程和 WebView 往返拥堵。
+  async function handleWindowMoved(physicalPosition) {
+    pendingMovePosition = physicalPosition;
+    if (moveHandling) return;
+    moveHandling = true;
+    try {
+      while (pendingMovePosition !== null) {
+        const latest = pendingMovePosition;
+        pendingMovePosition = null;
+        if (edgeState) await pinEdgeTab(latest);
+        else await checkSnap(latest);
+      }
+    } finally {
+      moveHandling = false;
+    }
+  }
+
   async function revealBoard() {
     if (!edgeState || transitioning) return;
     transitioning = true;
@@ -326,14 +350,13 @@ export function mountBoard() {
       codexLastResetAt = null;
       return;
     }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), CODEX_RESETS_TIMEOUT);
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), CODEX_RESETS_TIMEOUT);
       const response = await fetch(CODEX_RESETS_API, {
         headers: { accept: 'application/json' },
         signal: controller.signal,
       });
-      clearTimeout(timeout);
       if (!response.ok) return;
       const latest = (await response.json()).events?.[0]?.announced_at;
       if (!latest) return;
@@ -344,6 +367,8 @@ export function mountBoard() {
       codexLastResetAt = latest;
     } catch (error) {
       console.error('查询 CODEX 重置状态失败', error);
+    } finally {
+      window.clearTimeout(timeout);
     }
   }
 
@@ -583,8 +608,7 @@ export function mountBoard() {
   });
 
   appWindow.onMoved(({ payload }) => {
-    const task = edgeState ? pinEdgeTab(payload) : checkSnap(payload);
-    task.catch(console.error);
+    handleWindowMoved(payload).catch(console.error);
   });
 
   const contextMenuPromise = createContextMenu();
@@ -622,32 +646,41 @@ export function mountBoard() {
   // 双保险：未开启自动更新时，非手动触发一律直接返回
   async function checkForUpdates(manual = false) {
     if (!manual && !settings.autoUpdate) return;
-    let update = null;
+    if (updateCheckInProgress) return;
+    updateCheckInProgress = true;
     try {
-      update = await checkUpdate({ timeout: 30 * 1000 });
-    } catch (error) {
-      console.error('检查更新失败', error);
-      if (manual) updated.textContent = '检查更新失败';
-      return;
-    }
-    if (!update) {
-      if (manual) updated.textContent = '已是最新版本';
-      return;
-    }
-    // 下载安装失败（常见于安装包未解除 quarantine 权限限制）时弹窗引导用户手动处理
-    try {
-      updated.textContent = `更新 v${update.version} 中…`;
-      await update.downloadAndInstall();
-      await relaunch();
-    } catch (error) {
-      console.error('安装更新失败', error);
-      updated.textContent = '更新失败';
-      invoke('notify_update_failed').catch(console.error);
+      let update = null;
+      try {
+        update = await checkUpdate({ timeout: 30 * 1000 });
+      } catch (error) {
+        console.error('检查更新失败', error);
+        if (manual) updated.textContent = '检查更新失败';
+        return;
+      }
+      if (!update) {
+        if (manual) updated.textContent = '已是最新版本';
+        return;
+      }
+      // 下载安装失败（常见于安装包未解除 quarantine 权限限制）时弹窗引导用户手动处理
+      try {
+        updated.textContent = `更新 v${update.version} 中…`;
+        await update.downloadAndInstall();
+        await relaunch();
+      } catch (error) {
+        console.error('安装更新失败', error);
+        updated.textContent = '更新失败';
+        invoke('notify_update_failed').catch(console.error);
+      }
+    } finally {
+      updateCheckInProgress = false;
     }
   }
 
   refreshQuotas().catch(console.error);
-  window.setInterval(() => { refreshQuotas().catch(console.error); }, 5 * 60 * 1000);
-  window.setInterval(renderRefreshElapsed, 60 * 1000);
-  window.setInterval(() => applyPeakBadges(), 60 * 1000);
+  window.setInterval(() => { refreshQuotas().catch(console.error); }, QUOTA_REFRESH_INTERVAL);
+  // 合并分钟级 UI 更新与高峰期检查，减少后台定时器唤醒次数。
+  window.setInterval(() => {
+    renderRefreshElapsed();
+    applyPeakBadges();
+  }, MINUTE_TICK_INTERVAL);
 }

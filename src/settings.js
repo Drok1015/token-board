@@ -90,7 +90,7 @@ export function mountSettings() {
             <label class="setting-row setting-toggle provider-row">
               <span>
                 <strong>任务栏</strong>
-                <small>菜单栏状态区的彩色额度文字</small>
+                <small>菜单栏状态区的原生额度文字</small>
               </span>
               <input id="show-tray" type="checkbox">
             </label>

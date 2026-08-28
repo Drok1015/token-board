@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     fs,
     io::{BufRead, BufReader, Write},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Child, Command, Stdio},
+    sync::{mpsc, Mutex, OnceLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder},
@@ -15,6 +17,92 @@ use tauri::{
 };
 
 const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+const CODEX_CHILD_TIMEOUT: Duration = Duration::from_secs(12);
+
+struct QuotaHttpClient(reqwest::Client);
+
+impl Default for QuotaHttpClient {
+    fn default() -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(10 * 60))
+            .pool_max_idle_per_host(1)
+            .build()
+            .expect("构建额度 HTTP 客户端失败");
+        Self(client)
+    }
+}
+
+fn active_child_pids() -> &'static Mutex<HashSet<u32>> {
+    static PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+    PIDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Owns a child process, places it in an isolated process group and always reaps it.
+/// The PID registry lets the app terminate in-flight children before its event loop exits.
+struct ManagedChild {
+    child: Child,
+    pid: u32,
+    finished: bool,
+}
+
+impl ManagedChild {
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        command.process_group(0);
+        let child = command.spawn()?;
+        let pid = child.id();
+        active_child_pids().lock().unwrap().insert(pid);
+        Ok(Self {
+            child,
+            pid,
+            finished: false,
+        })
+    }
+
+    fn terminate_and_wait(&mut self) {
+        if self.finished {
+            return;
+        }
+        // Kill the entire process group so a helper inherited from the child cannot outlive the app.
+        unsafe {
+            libc::kill(-(self.pid as i32), libc::SIGKILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.finished = true;
+        active_child_pids().lock().unwrap().remove(&self.pid);
+    }
+
+    fn wait(&mut self) {
+        if self.finished {
+            return;
+        }
+        let _ = self.child.wait();
+        self.finished = true;
+        active_child_pids().lock().unwrap().remove(&self.pid);
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        self.terminate_and_wait();
+    }
+}
+
+fn terminate_active_children() {
+    let pids = active_child_pids()
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    for pid in pids {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+}
 
 // 额度窗口的重置时间，用于看板沙漏图标的悬浮提示（目前只有 CODEX 提供）
 #[derive(Serialize)]
@@ -401,15 +489,15 @@ fn codex_window(window: &Value) -> Option<(i64, String, Option<i64>)> {
 }
 
 fn read_codex_limits(cli: &str) -> Option<(String, Option<String>, Vec<QuotaReset>)> {
-    let mut child = Command::new(cli)
+    let mut command = Command::new(cli);
+    command
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    let mut child = ManagedChild::spawn(&mut command).ok()?;
 
-    let mut stdin = child.stdin.take()?;
+    let mut stdin = child.child.stdin.take()?;
     let initialize = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": { "clientInfo": { "name": "Token 看板", "version": "0.2.0" }, "capabilities": { "experimentalApi": true } }
@@ -421,33 +509,57 @@ fn read_codex_limits(cli: &str) -> Option<(String, Option<String>, Vec<QuotaRese
         || writeln!(stdin, "{read_limits}").is_err()
         || stdin.flush().is_err()
     {
-        let _ = child.kill();
         return None;
     }
-
-    let stdout = child.stdout.take()?;
-    let reader = BufReader::new(stdout);
-    let mut value = None;
-    for line in reader.lines().take(64) {
-        let Ok(line) = line else { break };
-        let Ok(payload) = serde_json::from_str::<Value>(&line) else { continue };
-        if payload.get("id").and_then(Value::as_i64) != Some(2) { continue; }
-        let Some(limits) = payload.pointer("/result/rateLimits") else { break };
-        let mut windows = ["secondary", "primary"].into_iter()
-            .filter_map(|name| limits.get(name).and_then(codex_window))
-            .collect::<Vec<_>>();
-        windows.sort_by_key(|(minutes, _, _)| *minutes);
-        if !windows.is_empty() {
-            let usage = windows.iter().map(|(_, text, _)| text.as_str()).collect::<Vec<_>>().join(" / ");
-            let plan = limits.get("planType").and_then(Value::as_str).map(readable_plan_name);
-            let resets = windows.iter().filter_map(|(minutes, _, reset_at_ms)| {
-                reset_at_ms.map(|ms| QuotaReset { label: window_label(*minutes), resets_at_ms: ms })
-            }).collect();
-            value = Some((usage, plan, resets));
+    let stdout = child.child.stdout.take()?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        let mut value = None;
+        for line in reader.lines().take(64) {
+            let Ok(line) = line else { break };
+            let Ok(payload) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if payload.get("id").and_then(Value::as_i64) != Some(2) {
+                continue;
+            }
+            let Some(limits) = payload.pointer("/result/rateLimits") else {
+                break;
+            };
+            let mut windows = ["secondary", "primary"]
+                .into_iter()
+                .filter_map(|name| limits.get(name).and_then(codex_window))
+                .collect::<Vec<_>>();
+            windows.sort_by_key(|(minutes, _, _)| *minutes);
+            if !windows.is_empty() {
+                let usage = windows
+                    .iter()
+                    .map(|(_, text, _)| text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ");
+                let plan = limits
+                    .get("planType")
+                    .and_then(Value::as_str)
+                    .map(readable_plan_name);
+                let resets = windows
+                    .iter()
+                    .filter_map(|(minutes, _, reset_at_ms)| {
+                        reset_at_ms.map(|ms| QuotaReset {
+                            label: window_label(*minutes),
+                            resets_at_ms: ms,
+                        })
+                    })
+                    .collect();
+                value = Some((usage, plan, resets));
+            }
+            break;
         }
-        break;
-    }
-    let _ = child.kill();
+        let _ = sender.send(value);
+    });
+
+    let value = receiver.recv_timeout(CODEX_CHILD_TIMEOUT).ok().flatten();
+    child.terminate_and_wait();
     value
 }
 
@@ -470,20 +582,26 @@ fn codex_line() -> QuotaLine {
 async fn get_quotas(app: tauri::AppHandle) -> Vec<QuotaLine> {
     let settings = read_settings(&app);
     let visible = |name: &str| settings.visible_providers.iter().any(|p| p == name);
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build();
-    let Ok(client) = client else { return vec![] };
-    let codex = visible("CODEX").then(|| tauri::async_runtime::spawn_blocking(codex_line));
-    let kimi = visible("KIMI").then(|| kimi_line(&client));
-    let glm = visible("GLM").then(|| glm_line(&client, &settings.glm_api_key));
-    let deepseek = visible("DEEPSEEK").then(|| deepseek_line(&client, &settings.deepseek_api_key));
-    let mut quotas = vec![];
-    if let Some(task) = codex {
-        quotas.push(task.await.unwrap_or(QuotaLine { provider: "CODEX", value: "读取失败".into(), plan: None, resets: Vec::new() }));
-    }
-    if let Some(future) = kimi { quotas.push(future.await); }
-    if let Some(future) = glm { quotas.push(future.await); }
-    if let Some(future) = deepseek { quotas.push(future.await); }
-    quotas
+    let client = app.state::<QuotaHttpClient>().0.clone();
+
+    // 四个供应商互不依赖，并发拉取可把最坏刷新时长从超时之和降到单个最慢请求。
+    let codex = async {
+        if !visible("CODEX") { return None; }
+        Some(tauri::async_runtime::spawn_blocking(codex_line).await.unwrap_or(QuotaLine {
+            provider: "CODEX", value: "读取失败".into(), plan: None, resets: Vec::new()
+        }))
+    };
+    let kimi = async {
+        if visible("KIMI") { Some(kimi_line(&client).await) } else { None }
+    };
+    let glm = async {
+        if visible("GLM") { Some(glm_line(&client, &settings.glm_api_key).await) } else { None }
+    };
+    let deepseek = async {
+        if visible("DEEPSEEK") { Some(deepseek_line(&client, &settings.deepseek_api_key).await) } else { None }
+    };
+    let lines = futures_util::future::join4(codex, kimi, glm, deepseek).await;
+    [lines.0, lines.1, lines.2, lines.3].into_iter().flatten().collect()
 }
 
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -544,7 +662,7 @@ fn save_settings(app: tauri::AppHandle, settings: BoardSettings) -> Result<(), S
 
 // ---------- 状态栏（托盘） ----------
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 struct TrayQuotaLine {
     provider: String,
     value: String,
@@ -556,10 +674,12 @@ struct TrayQuotaLine {
 #[derive(Default)]
 struct TrayState {
     last_lines: Vec<TrayQuotaLine>,
+    rendered_title: Option<String>,
+    rendered_visible: Option<bool>,
 }
 
 // 状态栏文案：有百分比窗口按顺序拼接（前面 5h、后面 7d），
-// 无百分比时取最后一个词（如 ¥7.38、读取失败）。仅作为字体渲染失败时的纯文本回退
+// 无百分比时取最后一个词（如 ¥7.38、读取失败），交给 macOS 原生文字渲染。
 fn tray_title(provider: &str, value: &str) -> String {
     let provider = provider.to_uppercase();
     let percents: Vec<&str> = value
@@ -575,160 +695,16 @@ fn tray_title(provider: &str, value: &str) -> String {
     }
 }
 
-// 托盘文字颜色，阈值与看板一致：>60% 白，<=60% 橙，<=30% 红
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TrayColor {
-    White,
-    Orange,
-    Red,
-}
-
-impl TrayColor {
-    fn for_pct(pct: u64) -> Self {
-        if pct <= 30 { TrayColor::Red } else if pct <= 60 { TrayColor::Orange } else { TrayColor::White }
-    }
-
-    fn rgb(self) -> [u8; 3] {
-        match self {
-            TrayColor::White => [245, 245, 245],
-            TrayColor::Orange => [235, 138, 10],
-            TrayColor::Red => [255, 69, 58],
-        }
-    }
-}
-
-// 状态栏彩色文字分段：供应商名固定白色且字号更大，各窗口百分比各自着色；元素间距在渲染时统一加。
-// 高峰期在供应商名后缀 (高)（与看板一致）；额度处于失败/未配置状态时不加，避免状态文案被稀释
-fn tray_segments(provider: &str, value: &str, peak: bool) -> Vec<(String, TrayColor, f32)> {
+// 使用 macOS 原生菜单栏文字，避免为少量状态文本解析并常驻整套 CJK 字体轮廓。
+// 高峰期在供应商名后缀 (高)（与看板一致）；失败/未配置状态不加，避免状态文案被稀释。
+fn tray_display_title(provider: &str, value: &str, peak: bool) -> String {
     let has_value = !value.contains("失败") && !value.starts_with('未');
-    let provider = if peak && has_value { format!("{}(高)", provider.to_uppercase()) } else { provider.to_uppercase() };
-    let parts: Vec<(&str, u64)> = value
-        .split(" / ")
-        .filter_map(|part| part.rsplit_once(' ').map(|(_, tail)| tail))
-        .filter(|tail| tail.ends_with('%'))
-        .filter_map(|tail| tail.trim_end_matches('%').parse::<u64>().ok().map(|pct| (tail, pct)))
-        .collect();
-    let mut segments = vec![(provider, TrayColor::White, TRAY_NAME_FONT_PX)];
-    if parts.is_empty() {
-        let tail = value.rsplit_once(' ').map(|(_, tail)| tail).unwrap_or(value);
-        let color = if value.contains("失败") || value.starts_with('未') { TrayColor::Red } else { TrayColor::White };
-        segments.push((tail.to_owned(), color, TRAY_FONT_PX));
-        return segments;
-    }
-    for (tail, pct) in parts {
-        segments.push((tail.to_owned(), TrayColor::for_pct(pct), TRAY_FONT_PX));
-    }
-    segments
-}
-
-const TRAY_ICON_HEIGHT: u32 = 36; // 18pt @2x，tray-icon 会缩放到 18pt 高
-const TRAY_FONT_PX: f32 = 26.0;
-const TRAY_NAME_FONT_PX: f32 = 22.0; // 供应商名字号比额度小
-const TRAY_ELEMENT_GAP: f32 = 16.0; // 元素之间的额外间距
-const TRAY_PAD_X: f32 = 20.0; // 蒙版左右内边距
-const TRAY_BASELINE: f32 = 26.0;
-const TRAY_MASK_ALPHA: u8 = 45; // 文字背后的浅色半透明圆角蒙版
-
-// 在 RGBA 缓冲上铺一层圆角矩形（胶囊形）深色蒙版，带抗锯齿边缘
-fn fill_rounded_mask(rgba: &mut [u8], width: u32, height: u32, alpha: u8) {
-    let (w, h) = (width as f32, height as f32);
-    let radius = h / 2.0;
-    for y in 0..height {
-        for x in 0..width {
-            let cx = x as f32 + 0.5;
-            let cy = y as f32 + 0.5;
-            let qx = (cx - w / 2.0).abs() - (w / 2.0 - radius);
-            let qy = (cy - h / 2.0).abs() - (h / 2.0 - radius);
-            let distance = qx.max(qy).min(0.0) + qx.max(0.0).hypot(qy.max(0.0)) - radius;
-            let coverage = (0.5 - distance).clamp(0.0, 1.0);
-            let a = (alpha as f32 * coverage).round() as u8;
-            if a == 0 {
-                continue;
-            }
-            let offset = ((y * width + x) * 4) as usize;
-            rgba[offset + 3] = a; // 蒙版为纯黑，只写 alpha
-        }
-    }
-}
-
-struct TrayFonts {
-    primary: fontdue::Font,
-    fallback: Option<fontdue::Font>,
-}
-
-impl TrayFonts {
-    // Helvetica 不含中文字形，「读取失败/未配置」等状态要回退到 CJK 字体，否则任务栏显示方块
-    fn for_char(&self, ch: char) -> &fontdue::Font {
-        if self.primary.lookup_glyph_index(ch) != 0 {
-            return &self.primary;
-        }
-        match &self.fallback {
-            Some(fallback) if fallback.lookup_glyph_index(ch) != 0 => fallback,
-            _ => &self.primary,
-        }
-    }
-}
-
-fn tray_fonts() -> Option<&'static TrayFonts> {
-    static FONTS: OnceLock<Option<TrayFonts>> = OnceLock::new();
-    FONTS.get_or_init(|| {
-        let data = fs::read("/System/Library/Fonts/Helvetica.ttc").ok()?;
-        // Helvetica.ttc 合集中 index 1 为 Bold 字重
-        let primary = fontdue::Font::from_bytes(data, fontdue::FontSettings { collection_index: 1, ..Default::default() }).ok()?;
-        let fallback = ["/System/Library/Fonts/Hiragino Sans GB.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"]
-            .iter()
-            .find_map(|path| {
-                fs::read(path).ok().and_then(|data| fontdue::Font::from_bytes(data, Default::default()).ok())
-            });
-        Some(TrayFonts { primary, fallback })
-    })
-    .as_ref()
-}
-
-// 托盘标题不支持富文本，把彩色文字渲染成 RGBA 图片设为托盘图标（文字即图标）
-fn render_tray_icon(segments: &[(String, TrayColor, f32)]) -> Option<tauri::image::Image<'static>> {
-    let fonts = tray_fonts()?;
-    let mut glyphs = vec![];
-    let mut pen_x = TRAY_PAD_X;
-    for (text, color, px) in segments {
-        for ch in text.chars() {
-            let (metrics, bitmap) = fonts.for_char(ch).rasterize(ch, *px);
-            glyphs.push((metrics, bitmap, *color, pen_x.round() as i32));
-            pen_x += metrics.advance_width;
-        }
-        pen_x += TRAY_ELEMENT_GAP;
-    }
-    let width = (pen_x - TRAY_ELEMENT_GAP + TRAY_PAD_X).ceil().max(1.0) as u32;
-    let mut rgba = vec![0u8; (width * TRAY_ICON_HEIGHT * 4) as usize];
-    fill_rounded_mask(&mut rgba, width, TRAY_ICON_HEIGHT, TRAY_MASK_ALPHA);
-    for (metrics, bitmap, color, x0) in glyphs {
-        let top = (TRAY_BASELINE - metrics.ymin as f32 - metrics.height as f32).round() as i32;
-        let left = x0 + metrics.xmin;
-        let [r, g, b] = color.rgb();
-        for (index, coverage) in bitmap.iter().enumerate() {
-            if *coverage == 0 {
-                continue;
-            }
-            let px = left + (index % metrics.width) as i32;
-            let py = top + (index / metrics.width) as i32;
-            if px < 0 || py < 0 || px >= width as i32 || py >= TRAY_ICON_HEIGHT as i32 {
-                continue;
-            }
-            // 文字按「源覆盖」规则与蒙版合成，边缘抗锯齿处正确透出底色
-            let offset = ((py as u32 * width + px as u32) * 4) as usize;
-            let src_a = *coverage as f32 / 255.0;
-            let dst_a = rgba[offset + 3] as f32 / 255.0;
-            let out_a = src_a + dst_a * (1.0 - src_a);
-            if out_a <= 0.0 {
-                continue;
-            }
-            rgba[offset] = (r as f32 * src_a / out_a).round() as u8;
-            rgba[offset + 1] = (g as f32 * src_a / out_a).round() as u8;
-            rgba[offset + 2] = (b as f32 * src_a / out_a).round() as u8;
-            rgba[offset + 3] = (out_a * 255.0).round() as u8;
-        }
-    }
-    Some(tauri::image::Image::new_owned(rgba, width, TRAY_ICON_HEIGHT))
+    let provider = if peak && has_value {
+        format!("{}(高)", provider.to_uppercase())
+    } else {
+        provider.to_uppercase()
+    };
+    tray_title(&provider, value)
 }
 
 fn tray_menu(app: &tauri::AppHandle, settings: &BoardSettings) -> tauri::Result<Menu<tauri::Wry>> {
@@ -754,27 +730,41 @@ fn tray_menu(app: &tauri::AppHandle, settings: &BoardSettings) -> tauri::Result<
 
 fn refresh_tray_title(app: &tauri::AppHandle) {
     let settings = read_settings(app);
-    let lines = app.state::<Mutex<TrayState>>().lock().unwrap().last_lines.clone();
+    let Some(tray) = app.tray_by_id("tray") else {
+        return;
+    };
+    let (lines, visibility_changed) = {
+        let tray_state = app.state::<Mutex<TrayState>>();
+        let mut state = tray_state.lock().unwrap();
+        let changed = state.rendered_visible != Some(settings.show_tray);
+        state.rendered_visible = Some(settings.show_tray);
+        (state.last_lines.clone(), changed)
+    };
+    if visibility_changed {
+        let _ = tray.set_visible(settings.show_tray);
+    }
+    if !settings.show_tray {
+        return;
+    }
     let line = lines
         .iter()
         .find(|line| line.provider == settings.tray_provider)
         .or(lines.first());
-    let Some(tray) = app.tray_by_id("tray") else { return };
-    let _ = tray.set_visible(settings.show_tray);
-    match line {
-        Some(line) => match render_tray_icon(&tray_segments(&line.provider, &line.value, line.peak)) {
-            Some(image) => {
-                let _ = tray.set_icon(Some(image));
-                let _ = tray.set_icon_as_template(false);
-                let _ = tray.set_title(Some(""));
-            }
-            None => {
-                let _ = tray.set_title(Some(tray_title(&line.provider, &line.value)));
-            }
-        },
-        None => {
-            let _ = tray.set_title(Some("TOKEN"));
+    let title = line
+        .map(|line| tray_display_title(&line.provider, &line.value, line.peak))
+        .unwrap_or_else(|| "TOKEN".into());
+    let changed = {
+        let tray_state = app.state::<Mutex<TrayState>>();
+        let mut state = tray_state.lock().unwrap();
+        if state.rendered_title.as_deref() == Some(title.as_str()) {
+            false
+        } else {
+            state.rendered_title = Some(title.clone());
+            true
         }
+    };
+    if changed {
+        let _ = tray.set_title(Some(title));
     }
 }
 
@@ -782,7 +772,6 @@ fn refresh_tray_title(app: &tauri::AppHandle) {
 fn refresh_tray(app: &tauri::AppHandle) {
     let settings = read_settings(app);
     if let Some(tray) = app.tray_by_id("tray") {
-        let _ = tray.set_visible(settings.show_tray);
         if let Ok(menu) = tray_menu(app, &settings) {
             let _ = tray.set_menu(Some(menu));
         }
@@ -793,8 +782,19 @@ fn refresh_tray(app: &tauri::AppHandle) {
 // 看板每次刷新额度后推送最新数据，托盘据此更新标题
 #[tauri::command]
 fn update_tray(app: tauri::AppHandle, lines: Vec<TrayQuotaLine>) {
-    app.state::<Mutex<TrayState>>().lock().unwrap().last_lines = lines;
-    refresh_tray_title(&app);
+    let changed = {
+        let tray_state = app.state::<Mutex<TrayState>>();
+        let mut state = tray_state.lock().unwrap();
+        if state.last_lines == lines {
+            false
+        } else {
+            state.last_lines = lines;
+            true
+        }
+    };
+    if changed {
+        refresh_tray_title(&app);
+    }
 }
 
 fn handle_tray_menu_event(app: &tauri::AppHandle, id: &str) {
@@ -863,15 +863,48 @@ fn close_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
-// CODEX 7d 额度较上次查询回升（重置）时弹系统对话框提醒；osascript 会等用户点击，后台运行不阻塞看板
-#[tauri::command]
-fn notify_codex_full() {
-    let _ = Command::new("osascript")
-        .args(["-e", r#"display dialog "codex重置了!!!老铁,抓紧蹬!!" with title "Token 看板" buttons {"知道了"} default button "知道了""#])
-        .spawn();
+fn active_dialogs() -> &'static Mutex<HashSet<&'static str>> {
+    static DIALOGS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    DIALOGS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-// 更新安装失败时弹系统对话框，引导用户手动解除 quarantine；osascript 会等用户点击，后台运行不阻塞看板
+fn spawn_managed_dialog(kind: &'static str, script: String) {
+    {
+        let mut dialogs = active_dialogs().lock().unwrap();
+        if !dialogs.insert(kind) {
+            return;
+        }
+    }
+
+    let mut command = Command::new("osascript");
+    command
+        .args(["-e", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match ManagedChild::spawn(&mut command) {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                child.wait();
+                active_dialogs().lock().unwrap().remove(kind);
+            });
+        }
+        Err(_) => {
+            active_dialogs().lock().unwrap().remove(kind);
+        }
+    }
+}
+
+// CODEX 重置提醒同类弹窗只保留一个；后台线程在用户关闭后 wait 回收 osascript。
+#[tauri::command]
+fn notify_codex_full() {
+    spawn_managed_dialog(
+        "codex-reset",
+        r#"display dialog "codex重置了!!!老铁,抓紧蹬!!" with title "Token 看板" buttons {"知道了"} default button "知道了""#.into(),
+    );
+}
+
+// 更新安装失败时弹系统对话框，引导用户手动解除 quarantine。
 fn update_failed_script() -> String {
     let lines = [
         "更新失败,可能是因为安装包没有进行权限处理,请按以下步骤尝试:",
@@ -885,7 +918,7 @@ fn update_failed_script() -> String {
 
 #[tauri::command]
 fn notify_update_failed() {
-    let _ = Command::new("osascript").args(["-e", &update_failed_script()]).spawn();
+    spawn_managed_dialog("update-failed", update_failed_script());
 }
 
 #[tauri::command]
@@ -901,9 +934,10 @@ fn open_app(app: &str) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(QuotaHttpClient::default())
         .manage(Mutex::new(TrayState::default()))
         .setup(|app| {
             let settings = read_settings(app.handle());
@@ -931,13 +965,37 @@ pub fn run() {
             notify_update_failed,
             update_tray
         ])
-        .run(tauri::generate_context!())
-        .expect("启动 Token 看板失败");
+        .build(tauri::generate_context!())
+        .expect("构建 Token 看板失败");
+
+    app.run(|_, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+            terminate_active_children();
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_child_drop_terminates_and_reaps_process() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = ManagedChild::spawn(&mut command).expect("sleep child should start");
+        let pid = child.pid;
+        drop(child);
+
+        let mut status = 0;
+        let result = unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) };
+        assert_eq!(result, -1, "child must already be reaped");
+        assert!(!active_child_pids().lock().unwrap().contains(&pid));
+    }
 
     #[test]
     fn kimi_credentials_prefer_kimi_code_then_legacy_kimi() {
@@ -1019,58 +1077,18 @@ mod tests {
     }
 
     #[test]
-    fn tray_segments_name_stays_white_and_each_window_colored() {
-        let segments = tray_segments("GLM", "5h 90% / 7d 45%", false);
+    fn tray_display_title_uses_native_text_and_peak_marker() {
         assert_eq!(
-            segments,
-            vec![
-                ("GLM".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
-                ("90%".to_owned(), TrayColor::White, TRAY_FONT_PX),
-                ("45%".to_owned(), TrayColor::Orange, TRAY_FONT_PX),
-            ]
+            tray_display_title("GLM", "5h 41% / 7d 86%", true),
+            "GLM(高) 41% 86%"
         );
         assert_eq!(
-            tray_segments("CODEX", "7d 22%", false),
-            vec![
-                ("CODEX".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
-                ("22%".to_owned(), TrayColor::Red, TRAY_FONT_PX)
-            ]
+            tray_display_title("DEEPSEEK", "余额 ¥14.99", true),
+            "DEEPSEEK(高) ¥14.99"
         );
-        assert_eq!(
-            tray_segments("DEEPSEEK", "余额 ¥7.38", false),
-            vec![
-                ("DEEPSEEK".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
-                ("¥7.38".to_owned(), TrayColor::White, TRAY_FONT_PX)
-            ]
-        );
-        assert_eq!(
-            tray_segments("CODEX", "读取失败", false),
-            vec![
-                ("CODEX".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
-                ("读取失败".to_owned(), TrayColor::Red, TRAY_FONT_PX)
-            ]
-        );
-    }
-
-    #[test]
-    fn tray_segments_append_peak_marker_to_provider_name() {
-        // 高峰期：名称后缀 (高)，窗口颜色不变；小写供应商名同样可用
-        assert_eq!(
-            tray_segments("GLM", "5h 41% / 7d 86%", true)[0],
-            ("GLM(高)".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX)
-        );
-        assert_eq!(
-            tray_segments("DEEPSEEK", "余额 ¥14.99", true),
-            vec![
-                ("DEEPSEEK(高)".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX),
-                ("¥14.99".to_owned(), TrayColor::White, TRAY_FONT_PX)
-            ]
-        );
-        // 失败/未配置状态即使处于高峰期也不加标识
-        assert_eq!(tray_segments("GLM", "读取失败", true)[0], ("GLM".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX));
-        assert_eq!(tray_segments("GLM", "未配置", true)[0], ("GLM".to_owned(), TrayColor::White, TRAY_NAME_FONT_PX));
-        // 非“读额”型（DeepSeek 中文余额）带高峰期时渲染不 panic 且含 CJK 字形
-        assert!(render_tray_icon(&tray_segments("DEEPSEEK", "余额 ¥14.99", true)).is_some());
+        // 失败/未配置状态即使处于高峰期也不加标识。
+        assert_eq!(tray_display_title("GLM", "读取失败", true), "GLM 读取失败");
+        assert_eq!(tray_display_title("GLM", "未配置", true), "GLM 未配置");
     }
 
     #[test]
@@ -1082,19 +1100,6 @@ mod tests {
         assert!(script.contains(r#"com.apple.quarantine \"/Applications/Token 看板.app\""#));
         assert!(script.contains("1.关闭app并将Token 看板.app移入Applications中"));
         assert!(script.contains("3.重新打开app会自动更新下载"));
-    }
-
-    #[test]
-    fn tray_fonts_fall_back_to_cjk_for_chinese_status_text() {
-        let fonts = tray_fonts().expect("system fonts should load");
-        let fallback = fonts.fallback.as_ref().expect("a CJK fallback font should load");
-        for ch in "读取失败未配置登录".chars() {
-            assert!(std::ptr::eq(fonts.for_char(ch), fallback), "「{ch}」应由 CJK 回退字体渲染");
-        }
-        assert!(std::ptr::eq(fonts.for_char('A'), &fonts.primary));
-        // 渲染整条「读取失败」不应 panic 且所有汉字都有真实字形
-        let segments = tray_segments("CODEX", "读取失败", false);
-        assert!(render_tray_icon(&segments).is_some());
     }
 
     #[test]
