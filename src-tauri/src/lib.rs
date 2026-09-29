@@ -488,7 +488,7 @@ fn codex_window(window: &Value) -> Option<(i64, String, Option<i64>)> {
     Some((minutes, format!("{} {}%", window_label(minutes), 100 - used), codex_reset_epoch_ms(window)))
 }
 
-fn read_codex_limits(cli: &str) -> Option<(String, Option<String>, Vec<QuotaReset>)> {
+fn read_codex_limits(cli: &Path) -> Option<(String, Option<String>, Vec<QuotaReset>)> {
     let mut command = Command::new(cli);
     command
         .args(["app-server", "--stdio"])
@@ -563,14 +563,69 @@ fn read_codex_limits(cli: &str) -> Option<(String, Option<String>, Vec<QuotaRese
     value
 }
 
-fn codex_line() -> QuotaLine {
-    let cli = if std::path::Path::new("/Applications/ChatGPT.app/Contents/Resources/codex").is_file() {
-        "/Applications/ChatGPT.app/Contents/Resources/codex"
-    } else {
-        "codex"
+/// nvm 下可能有多个 Node 版本各自装了 codex，按版本号从高到低给出候选路径。
+fn nvm_codex_paths(node_root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(node_root) else {
+        return Vec::new();
     };
+    let mut versions = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    versions.sort_by(|a, b| version_key(&b.to_string_lossy()).cmp(&version_key(&a.to_string_lossy())));
+    versions
+        .into_iter()
+        .map(|version| node_root.join(version).join("bin/codex"))
+        .collect()
+}
+
+fn version_key(version: &str) -> Vec<u32> {
+    version
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
+        .collect()
+}
+
+/// ChatGPT 桌面版自带的 codex 目录随其版本更新变动过（旧版在 `Resources/codex`，新版在
+/// `Resources/codex-cli`），用户也可能用 nvm / Homebrew / bun 等自行安装，而 GUI 启动的看板
+/// 拿不到登录 shell 的 PATH。因此先按绝对路径候选查找，都不存在时再退回裸 `codex` 交给 PATH。
+fn codex_cli() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut candidates = vec![
+        PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"),
+        PathBuf::from("/Applications/ChatGPT.app/Contents/Resources/codex"),
+        PathBuf::from("/opt/homebrew/bin/codex"),
+        PathBuf::from("/usr/local/bin/codex"),
+    ];
+    if let Some(home) = &home {
+        candidates.extend([
+            home.join(".local/bin/codex"),
+            home.join(".bun/bin/codex"),
+            home.join(".volta/bin/codex"),
+            home.join("Library/pnpm/codex"),
+            home.join("Library/Application Support/fnm/aliases/default/bin/codex"),
+        ]);
+        candidates.extend(nvm_codex_paths(&home.join(".nvm/versions/node")));
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        candidates.extend(
+            path.split(':')
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| Path::new(dir).join("codex")),
+        );
+    }
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("codex"))
+}
+
+fn codex_line() -> QuotaLine {
+    let cli = codex_cli();
     for attempt in 0..2 {
-        if let Some((value, plan, resets)) = read_codex_limits(cli) {
+        if let Some((value, plan, resets)) = read_codex_limits(&cli) {
             return QuotaLine { provider: "CODEX", value, plan, resets };
         }
         if attempt == 0 { std::thread::sleep(std::time::Duration::from_millis(600)); }
